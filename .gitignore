@@ -1,5 +1,4 @@
 node_modules/
-.idea/
-android/app/build/
-*.apk
-key
+android/
+.capacitor/
+dist/

@@ -1,58 +1,22 @@
-/*
- * [Whale-LLT]
- * Copyright (C) [2025] [Xuan Jing]
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
 // 默认记忆表模板
-const defaultMemoryTable = `# 角色设定
-- 姓名：
-- 性格特点：
-- 性别：
-- 说话风格：
-- 职业：
-
-# 用户设定
-- 姓名：
-- 性别：
-- 与角色的关系：
-- 用户性格：
-
-# 背景设定
+const defaultMemoryTable = `# 背景设定
 - 时间地点：
 - 事件：
-
+---
 ## 📋 记忆表格
 
 ### 【现在】
 | 项目 | 内容 |
 |------|------|
-| 地点 | 未知 |
-| 人物 | 未知 |
-| 时间 | 未知 |
+| 地点 | [当前所在的具体地点] |
+| 人物 | [当前在场的所有人物] |
+| 时间 | [精确的年月日和时间，格式：YYYY年MM月DD日 HH:MM] |
 
-### 【未来】
-| 约定事项 | 详细内容 |
-|----------|----------|
-
-### 【过去】
-| 人物 | 事件 | 地点 | 时间 |
-|------|------|------|------|
-
-### 【重要物品】
+### 【重要物品（真实存在的物品）】
 | 物品名称 | 物品描述 | 重要原因 |
 |----------|----------|----------|
+| [物品1]   | [详细的外观和特征描述] | [为什么这个物品重要] |
+| [物品2]   | [详细的外观和特征描述] | [为什么这个物品重要] |
 `;
 
 // 记忆表管理类
@@ -60,6 +24,9 @@ class MemoryTableManager {
     constructor() {
         this.isInitialized = false;
         this.currentContact = null;
+        this.lastToggleTime = 0;
+        this.isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        this.debounceDelay = this.isIOSDevice ? 300 : 100; // iOS设备使用更长的防抖延迟
     }
 
     setCurrentContact(contact) {
@@ -116,109 +83,22 @@ class MemoryTableManager {
         return true;
     }
 
-    // 从API响应中提取 Diff 并应用
-    extractMemoryTableFromResponse(responseText, currentMemoryMarkdown) {
-        const diffRegex = /<memory_diff>([\s\S]*?)<\/memory_diff>/;
-        const diffMatch = responseText.match(diffRegex);
+    // 从API响应中提取记忆表内容
+    extractMemoryTableFromResponse(responseText) {
+        const memoryTableRegex = /<memory_table>([\s\S]*?)<\/memory_table>/;
+        const memoryMatch = responseText.match(memoryTableRegex);
         
-        let cleanedResponse = responseText.replace(diffRegex, '').trim();
-        // 兼容处理：如果 AI 还是输出了完整的 <memory_table>，也把它清洗掉
-        cleanedResponse = cleanedResponse.replace(/<memory_table>([\s\S]*?)<\/memory_table>/, '').trim();
-        
-        if (diffMatch && diffMatch[1]) {
-            try {
-                // 允许 AI 输出时带 markdown 的 json 代码块
-                let jsonStr = diffMatch[1].replace(/```json\n?|\n?```/g, '').trim();
-                const diffArray = JSON.parse(jsonStr);
-                
-                // 应用 Diff 到当前的 markdown (你需要确保传入了 currentMemoryMarkdown)
-                const newMemoryTable = this.applyMemoryDiff(currentMemoryMarkdown || this.getDefaultTemplate(), diffArray);
-                
-                return {
-                    memoryTable: newMemoryTable,
-                    cleanedResponse: cleanedResponse
-                };
-            } catch (e) {
-                console.error("解析记忆 Diff JSON 失败:", e);
-                return { memoryTable: currentMemoryMarkdown, cleanedResponse };
-            }
+        if (memoryMatch && memoryMatch[1]) {
+            return {
+                memoryTable: memoryMatch[1].trim(),
+                cleanedResponse: responseText.replace(memoryTableRegex, '').trim()
+            };
         }
         
         return {
-            memoryTable: currentMemoryMarkdown, // 没变化就返回原值
-            cleanedResponse: cleanedResponse
+            memoryTable: null,
+            cleanedResponse: responseText
         };
-    }
-
-    // 新增：根据 JSON 数组修改 Markdown 文本（基础版实现）
-    applyMemoryDiff(markdown, diffArray) {
-        if (!Array.isArray(diffArray)) return markdown;
-        let lines = markdown.split(/\r?\n/);
-        const escapeRegExp = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const isMarkdownHeadingLine = line => /^#{1,6}\s+\S/.test(String(line).trim());
-
-        diffArray.forEach(op => {
-            try {
-                const sectionName = op.section != null ? String(op.section) : '';
-                if (!sectionName) return;
-
-                const primaryHeader = `### 【${sectionName}】`;
-                let startIndex = -1;
-
-                for (let i = 0; i < lines.length; i++) {
-                    if (lines[i].includes(primaryHeader)) {
-                        startIndex = i;
-                        break;
-                    }
-                }
-                if (startIndex === -1) {
-                    const fallbackRe = new RegExp(`^#\\s+${escapeRegExp(sectionName)}\\s*$`);
-                    for (let i = 0; i < lines.length; i++) {
-                        if (fallbackRe.test(lines[i].trim())) {
-                            startIndex = i;
-                            break;
-                        }
-                    }
-                }
-
-                if (startIndex === -1) return;
-
-                let endIndex = lines.length;
-                for (let j = startIndex + 1; j < lines.length; j++) {
-                    if (isMarkdownHeadingLine(lines[j])) {
-                        endIndex = j;
-                        break;
-                    }
-                }
-
-                if (op.op === 'update') {
-                    for (let i = startIndex; i < endIndex; i++) {
-                        if (lines[i].includes(`| ${op.key} |`)) {
-                            lines[i] = `| ${op.key} | ${op.value} |`;
-                            break;
-                        }
-                    }
-                } else if (op.op === 'append') {
-                    let insertIndex = endIndex;
-                    while (insertIndex > startIndex && lines[insertIndex - 1].trim() === '') {
-                        insertIndex--;
-                    }
-                    lines.splice(insertIndex, 0, String(op.line).trim());
-                } else if (op.op === 'delete') {
-                    for (let i = startIndex; i < endIndex; i++) {
-                        if (lines[i].includes(op.keyword)) {
-                            lines.splice(i, 1);
-                            i--;
-                            endIndex--;
-                        }
-                    }
-                }
-            } catch (e) {
-                console.warn("应用 Diff 操作失败跳过:", op, e);
-            }
-        });
-
-        return lines.join('\n');
     }
 
     // 切换记忆面板显示/隐藏
@@ -231,9 +111,27 @@ class MemoryTableManager {
             return; 
         }
         
+        // 防抖机制：防止短时间内重复触发（特别是iOS设备）
+        const currentTime = Date.now();
+        if (currentTime - this.lastToggleTime < this.debounceDelay) {
+            return;
+        }
+        this.lastToggleTime = currentTime;
+        
         if (isActive) {
             panel.classList.remove('active');
         } else {
+            // iOS设备额外检查：确保不是在键盘变化期间
+            if (this.isIOSDevice) {
+                const viewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+                const fullHeight = window.screen.height;
+                const keyboardVisible = viewportHeight < fullHeight * 0.75; // 如果视口高度小于屏幕高度的75%，认为键盘可能正在显示
+                
+                if (keyboardVisible) {
+                    return;
+                }
+            }
+            
             const currentContact = this.getCurrentContact();
             
             if (currentContact) {
@@ -244,10 +142,6 @@ class MemoryTableManager {
                 memoryTextarea.style.display = 'none';
                 document.getElementById('memoryEditBtn').textContent = '编辑';
                 panel.classList.add('active');
-                // 默认显示记忆表格标签页
-                if (window.switchMemoryTab) {
-                    window.switchMemoryTab('table');
-                }
             } else {
                 if (window.showToast) {
                     window.showToast('请先选择一个聊天');
@@ -282,9 +176,9 @@ class MemoryTableManager {
             // 保存记忆表内容
             currentContact.memoryTableContent = editArea.value;
             
-            // 【核心修正】调用正确的函数来保存联系人数据
-            if (window.updateContactInDB) {
-                await window.updateContactInDB(currentContact);
+            // 调用保存函数（如果存在）
+            if (window.saveDataToDB) {
+                await window.saveDataToDB();
             }
             
             this.renderMemoryTable(currentContact.memoryTableContent);
@@ -308,15 +202,49 @@ class MemoryTableManager {
             return;
         }
 
-        // 确保 marked 库已加载
-        if (typeof marked !== 'undefined') {
-            viewDiv.innerHTML = markdown 
-                ? marked.parse(markdown) 
-                : this.getEmptyMemoryTableHtml();
-        } else {
-            // Fallback if marked is not loaded
-            viewDiv.innerHTML = `<pre>${markdown || '记忆表为空'}</pre>`;
+        // 检查内容是否为空
+        if (!markdown || markdown.trim() === '') {
+            viewDiv.innerHTML = this.getEmptyMemoryTableHtml();
+            return;
         }
+
+        try {
+            // 预处理markdown内容，防止表格单元格内容过长
+            const cleanedMarkdown = this.preprocessMarkdownTable(markdown);
+            
+            // 确保 marked 库已加载
+            if (typeof marked !== 'undefined') {
+                viewDiv.innerHTML = marked.parse(cleanedMarkdown);
+            } else {
+                // Fallback if marked is not loaded
+                console.warn('marked库未加载，使用预览模式');
+                viewDiv.innerHTML = `<pre style="white-space: pre-wrap; word-wrap: break-word;">${cleanedMarkdown}</pre>`;
+            }
+        } catch (error) {
+            console.error('渲染记忆表失败:', error);
+            viewDiv.innerHTML = `<div style="color: #e53e3e; padding: 20px; text-align: center;">
+                <p>记忆表渲染失败</p>
+                <small>请检查记忆表格式是否正确</small>
+            </div>`;
+        }
+    }
+
+    // 预处理markdown表格内容，防止单元格内容过长
+    preprocessMarkdownTable(markdown) {
+        if (!markdown || typeof markdown !== 'string') {
+            return '';
+        }
+
+        // 限制表格单元格内容的最大长度
+        const MAX_CELL_LENGTH = 500;
+        
+        return markdown.replace(/\|([^|\n]*?)\|/g, (match, cellContent) => {
+            if (cellContent && cellContent.length > MAX_CELL_LENGTH) {
+                const truncated = cellContent.substring(0, MAX_CELL_LENGTH).trim();
+                return `|${truncated}...|`;
+            }
+            return match;
+        });
     }
 
     // 获取空记忆表的HTML
@@ -446,6 +374,182 @@ class MemoryTableManager {
             totalMatches: matches.length
         };
     }
+
+    // 使用次要模型更新记忆表格
+    async updateMemoryTableWithSecondaryModel(contact) {
+        try {
+            // 获取当前联系人
+            const currentContact = this.getCurrentContact();
+            if (!currentContact || currentContact.id !== contact.id) {
+                console.warn('当前联系人不匹配，跳过记忆表格更新');
+                return false;
+            }
+
+            // 获取最近的对话历史
+            const recentMessages = this.getRecentMessages(currentContact, 10);
+            if (recentMessages.length === 0) {
+                console.log('没有对话历史，跳过记忆表格更新');
+                return false;
+            }
+
+            // 使用promptBuilder构建记忆表格更新提示词
+            if (!window.promptBuilder) {
+                console.error('promptBuilder未初始化');
+                return false;
+            }
+
+            const memoryUpdatePrompt = window.promptBuilder.buildMemoryUpdatePrompt(
+                contact, 
+                window.userProfile || { name: '用户', nickname: '用户', personality: '' }, 
+                currentContact, 
+                window.apiSettings,
+                recentMessages
+            );
+
+            // 获取模型配置
+            const modelToUse = this.getSecondaryModel();
+            
+            // 调用API更新记忆表格
+            const response = await window.apiService.callOpenAIAPI(
+                window.apiSettings.url,
+                window.apiSettings.key,
+                modelToUse,
+                [{ role: 'user', content: memoryUpdatePrompt }],
+                { 
+                    temperature: 0.3,
+                    max_tokens: 8000,
+                    stream: false
+                },
+                (window.apiSettings.timeout || 60) * 1000
+            );
+            console.log('记忆表格更新API完整返回:', JSON.stringify(response, null, 2));
+
+            // 处理响应
+            if (!response || !response.choices || !response.choices[0] || !response.choices[0].message) {
+                console.warn('记忆表格更新API响应格式异常:', response);
+                return false;
+            }
+
+            const newMemoryTableContent = response.choices[0].message.content;
+            if (!newMemoryTableContent || newMemoryTableContent.trim() === '') {
+                console.warn('记忆表格更新API返回空内容');
+                return false;
+            }
+
+            // 更新联系人的记忆表格内容
+            const updateResult = this.updateContactMemoryTable(contact, newMemoryTableContent.trim());
+            if (updateResult) {
+                console.log('记忆表格更新成功');
+                // 保存数据
+                if (window.saveDataToDB) {
+                    await window.saveDataToDB();
+                }
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            console.error('使用次要模型更新记忆表格失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 异步更新记忆表格 - 使用API队列
+     */
+    async updateMemoryTableAsync(contact, options = {}) {
+        if (!window.apiRequestQueue) {
+            console.warn('API队列未初始化，回退到同步更新');
+            return this.updateMemoryTableWithSecondaryModel(contact);
+        }
+
+        const priority = options.priority || window.apiRequestQueue.PRIORITY.LOW;
+        const description = `更新${contact.name || contact.nickname || '联系人'}的记忆表格`;
+        const EVENT_TYPE = 'memory_update';
+        const STATUS_BALL_ID = `special_event_${EVENT_TYPE}`;
+
+        // 显示记忆更新状态球
+        if (window.statusBallManager && window.STATUS_BALL_CONFIGS?.[EVENT_TYPE]) {
+            const queueState = {
+                completedTasks: 0,
+                totalTasks: 1,
+                currentTask: description,
+                eventType: EVENT_TYPE,
+                config: window.STATUS_BALL_CONFIGS[EVENT_TYPE]
+            };
+            window.statusBallManager.showSpecialEvent(EVENT_TYPE, queueState);
+        }
+
+        return new Promise((resolve) => {
+            window.apiRequestQueue.addRequest(
+                () => this.updateMemoryTableWithSecondaryModel(contact),
+                {
+                    priority,
+                    description,
+                    onComplete: (requestId, result) => {
+                        console.log(`记忆表格异步更新完成: ${description}`);
+                        
+                        // 更新悬浮球状态为完成
+                        if (window.statusBallManager && window.STATUS_BALL_CONFIGS?.[EVENT_TYPE]) {
+                            const completedState = {
+                                completedTasks: 1,
+                                totalTasks: 1,
+                                currentTask: description,
+                                eventType: EVENT_TYPE,
+                                config: window.STATUS_BALL_CONFIGS[EVENT_TYPE],
+                                completed: true
+                            };
+                            window.statusBallManager.showSpecialEvent(EVENT_TYPE, completedState);
+                            
+                            // 3秒后自动隐藏
+                            setTimeout(() => {
+                                if (window.statusBallManager) {
+                                    window.statusBallManager.removeState(STATUS_BALL_ID);
+                                }
+                            }, 3000);
+                        }
+                        
+                        resolve(result);
+                    },
+                    onError: (requestId, error) => {
+                        console.error(`记忆表格异步更新失败: ${description}`, error);
+                        
+                        // 隐藏悬浮球（失败时）
+                        if (window.statusBallManager) {
+                            window.statusBallManager.removeState(STATUS_BALL_ID);
+                        }
+                        
+                        resolve(false);
+                    }
+                }
+            );
+        });
+    }
+
+    // 获取次要模型
+    getSecondaryModel() {
+        const secondaryModel = window.apiSettings?.secondaryModel;
+        if (secondaryModel && secondaryModel !== 'sync_with_primary') {
+            return secondaryModel;
+        }
+        // 如果没有配置次要模型，使用主要模型
+        return window.apiSettings?.model || 'gpt-3.5-turbo';
+    }
+
+    // 获取最近的对话消息
+    getRecentMessages(contact, count = 10) {
+        if (!contact || !contact.messages) {
+            return [];
+        }
+        
+        return contact.messages
+            .slice(-count) // 取最近的消息
+            .map(msg => ({
+                role: msg.type === 'user' ? 'user' : 'assistant',
+                content: msg.content,
+                timestamp: msg.timestamp
+            }));
+    }
 }
 
 // 创建全局记忆表管理器实例
@@ -462,6 +566,13 @@ window.toggleMemoryEditMode = function() {
 
 window.renderMemoryTable = function(markdown) {
     return window.memoryTableManager.renderMemoryTable(markdown);
+};
+
+window.updateMemoryTableWithSecondaryModel = function(contact, useAsync = true) {
+    if (useAsync && window.memoryTableManager && window.memoryTableManager.updateMemoryTableAsync) {
+        return window.memoryTableManager.updateMemoryTableAsync(contact);
+    }
+    return window.memoryTableManager.updateMemoryTableWithSecondaryModel(contact);
 };
 
 // 暴露默认模板

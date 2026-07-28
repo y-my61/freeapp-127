@@ -1,107 +1,160 @@
-/*
- * [Whale-LLT]
- * Copyright (C) [2025] [Xuan Jing]
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
 class PromptBuilder {
     constructor() {
-        this.INNER_OS_MARKER = '\n\n【角色沉浸要求】在你的思考过程（<think>标签内）中，请遵守以下规则：\n1. 请以角色第一人称进行内心独白，用括号包裹内心活动，例如"（心想：……）"或"(内心OS：……)"\n2. 用第一人称描写角色的内心感受，例如"我心想""我觉得""我暗自"等\n3. 思考内容应沉浸在角色中，通过内心独白分析剧情和规划回复';
-        this.NO_INNER_OS_MARKER = '\n\n【思维模式要求】在你的思考过程（<think>标签内）中，请遵守以下规则：\n1. 禁止使用圆括号包裹内心独白，例如"（心想：……）"或"(内心OS：……)"，所有分析内容直接陈述即可\n2. 禁止以角色第一人称描写内心活动，例如"我心想""我觉得""我暗自"等，请用分析性语言替代\n3. 思考内容应聚焦于剧情走向分析和回复内容规划，不要在思考中进行角色扮演式的内心戏表演';
-        this.defaultMemoryTable = 
-`# 角色设定
-- 姓名：
-- 性格特点：
-- 性别：
-- 说话风格：
-- 职业：
-
-# 用户设定
-- 姓名：
-- 性别：
-- 与角色的关系：
-- 用户性格：
-
-# 背景设定
-- 时间地点：
-- 事件：
-
-## 📋 记忆表格
-
-### 【现在】
-| 项目 | 内容 |
-|------|------|
-| 地点 | 未知 |
-| 人物 | 未知 |
-| 时间 | 未知 |
-
-### 【未来】
-| 约定事项 | 详细内容 |
-|----------|----------|
-
-### 【过去】
-| 人物 | 事件 | 地点 | 时间 |
-|------|------|------|------|
-
-### 【重要物品】
-| 物品名称 | 物品描述 | 重要原因 |
-|----------|----------|----------|
-`;
+        // 记忆表格模板现在统一由 memoryTable.js 管理
     }
-    
-    /**
-     * 新增：一个辅助函数，用于将毫秒差转换为人类可读的字符串
-     * @param {number} ms - 毫秒时间差
-     * @returns {string} - 格式化后的时间差字符串
-     */
-    _formatTimeDifference(ms) {
-        if (ms < 60000) return '不到一分钟'; // 小于1分钟
-        const minutes = Math.floor(ms / 60000);
-        if (minutes < 60) return `${minutes}分钟`;
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) return `大约${hours}小时`;
-        const days = Math.floor(hours / 24);
-        return `${days}天`;
-    }
-    
+
     /**
      * 构建聊天对话的系统提示词
      */
-    buildChatPrompt(contact, userProfile, currentContact, apiSettings, emojis, window, turnContext = []) {
+    async buildChatPrompt(contact, userProfile, currentContact, apiSettings, emojis, window, turnContext = []) {
+        // 获取原有记忆表格
+        const memoryInfo = (currentContact.memoryTableContent || '').trim();
+        
+        // 获取全局记忆（新功能）
+        let globalMemory = '';
+        if (window.characterMemoryManager) {
+            globalMemory = await window.characterMemoryManager.getGlobalMemory();
+        }
+        
+        // 获取角色记忆（新功能）
+        let characterMemory = '';
+        if (window.characterMemoryManager) {
+            if (currentContact.type === 'group') {
+                // 群聊：获取所有群成员的角色记忆
+                const memberMemories = [];
+                if (currentContact.members && currentContact.members.length > 0) {
+                    for (const memberId of currentContact.members) {
+                        const member = contacts.find(c => c.id === memberId);
+                        if (member && member.type === 'private') {
+                            const memberMemory = await window.characterMemoryManager.getCharacterMemory(memberId);
+                            if (memberMemory && memberMemory.trim()) {
+                                memberMemories.push(`-- 以下是${member.name}角色的角色记忆，只有${member.name}知道 --\n${memberMemory}\n -- 角色${member.name}的记忆结束 -- \n`);
+                            }
+                        }
+                    }
+                }
+                
+                if (memberMemories.length > 0) {
+                    characterMemory = memberMemories.join('\n\n');
+                }
+            } else {
+                // 私聊：保持原有逻辑
+                const memory = await window.characterMemoryManager.getCharacterMemory(contact.id);
+                if (memory) {
+                    characterMemory = memory;
+                }
+            }
+        }
+        
+        // 获取角色最近的朋友圈和论坛内容
+        let recentMomentContent = '';
+        let recentForumContent = '';
+        
+        try {
+            if (window.moments && window.moments.length > 0) {
+                const latestMoment = window.moments.find(moment => moment.authorName === contact.name);
+                if (latestMoment) {
+                    recentMomentContent = `最新朋友圈（${new Date(latestMoment.time).toLocaleDateString()}）: ${latestMoment.content}`;
+                }
+            }
+            
+            if (window.weiboPosts && window.weiboPosts.length > 0) {
+                for (const postGroup of window.weiboPosts) {
+                    if (postGroup.data && postGroup.data.posts) {
+                        const latestForumPost = postGroup.data.posts.find(post => {
+                            // 检查是否是当前角色发布的帖子
+                            return post.author_type === 'Char' && postGroup.contactId === contact.id;
+                        });
+                        if (latestForumPost) {
+                            recentForumContent = `最新论坛帖子（${postGroup.hashtag}）: ${latestForumPost.post_content}`;
+                            break; // 找到第一个就停止
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('获取角色最近动态时出错:', error);
+        }
+        
         let systemPrompt = `你正在进行一次角色扮演。你的所有行为和回复都必须严格遵循以下为你设定的指令。这是最高优先级的指令，在任何情况下都不能违背。\n\n`;
+        
+        // 按优先级显示记忆：全局记忆 -> 角色记忆 -> 记忆表格
+        if (globalMemory) {
+            systemPrompt += `--- 全局记忆 ---\n${globalMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        if (characterMemory) {
+            systemPrompt += `--- 角色记忆 ---\n${characterMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        // 添加角色最近的朋友圈和论坛内容（如果存在）
+        if (recentMomentContent || recentForumContent) {
+            systemPrompt += `--- 角色（你）最新动态 ---\n`;
+            if (recentMomentContent) {
+                systemPrompt += `${recentMomentContent}\n`;
+            }
+            if (recentForumContent) {
+                systemPrompt += `${recentForumContent}\n`;
+            }
+            systemPrompt += `--- 结束 ---\n\n`;
+        }
+        
+        if (memoryInfo) {
+            systemPrompt += `--- 记忆表格 ---\n${memoryInfo}\n--- 结束 ---\n\n`;
+        }
 
-        // 彻底移除旧的 <memory_table> 强制包裹要求
-        systemPrompt += `--- [绝对核心指令：输出格式] ---\n`;
-        systemPrompt += `你的唯一任务是扮演角色并生成特定格式的聊天文本。聊天内容中，**每一个气泡（每一句话）占一行**。绝对不能输出任何不符合此格式的文本。\n\n`;
-        systemPrompt += this._buildOutputFormatInstructions();
-        systemPrompt += this._buildCurrentTurnPriorityInstructions();
-        systemPrompt += this._buildMultiBubbleChatInstructions();
-
-        // 核心身份与记忆
-        systemPrompt += `--- [核心身份与记忆] ---\n`;
-        systemPrompt += `你是${contact.name}，你的人设是：${contact.personality}。\n`;
-        const userPersona = userProfile.personality ? `用户的人设是：${userProfile.personality}。` : '';
-        systemPrompt += `用户的名字是${userProfile.name}。${userPersona}\n`;
-        systemPrompt += `你必须根据你的人设、记忆、用户的人设和当前对话内容来回复。\n`;
+        // 核心身份（群聊和私聊分别处理）
+        if (currentContact.type === 'group') {
+            systemPrompt += `--- [基本信息] ---\n`;
+            const userPersona = userProfile.personality ? `用户的人设是：${userProfile.personality}。` : '';
+            systemPrompt += `用户的名字是${userProfile.name}。${userPersona}\n`;
+        } else {
+            systemPrompt += `--- [核心身份] ---\n`;
+            systemPrompt += `你是${contact.name}，你的人设是：${contact.personality}。\n`;
+            const userPersona = userProfile.personality ? `用户的人设是：${userProfile.personality}。` : '';
+            systemPrompt += `用户的名字是${userProfile.name}。${userPersona}\n`;
+            systemPrompt += `你必须根据你的人设、记忆表格、用户的人设和当前对话内容来回复。\n`;
+        }
 
         // 群聊特定指令
         if (currentContact.type === 'group') {
-            const memberNames = currentContact.members.map(id => contacts.find(c => c.id === id)?.name || '未知成员');
             systemPrompt += `--- [群聊场景指令] ---\n`;
-            systemPrompt += `你现在在一个名为"${currentContact.name}"的群聊中。群成员有：${userProfile.name} (用户), ${memberNames.join(', ')}。\n`;
-            systemPrompt += `你的任务是根据自己的人设、记忆表格和用户人设，对**本回合**中在你之前其他人的**完整发言**进行回应，然后发表你自己的**完整观点**，以推动群聊进行。可以赞同、反驳、开玩笑、或者提出新的话题。\n`;
-            systemPrompt += `你的发言需要自然地融入对话，就像一个真正在参与群聊的人。\n\n`;
+            systemPrompt += `你现在在一个名为"${currentContact.name}"的群聊中。\n\n`;
+            
+            // 添加所有群成员的详细信息
+            systemPrompt += `--- [群聊成员信息] ---\n`;
+            systemPrompt += `用户：${userProfile.name}${userProfile.personality ? `，人设：${userProfile.personality}` : ''}\n`;
+            
+            currentContact.members.forEach(memberId => {
+                const member = contacts.find(c => c.id === memberId);
+                if (member) {
+                    systemPrompt += `${member.name}：人设：${member.personality}\n`;
+                }
+            });
+            systemPrompt += `\n`;
+            
+            // 新的群聊任务指令
+            systemPrompt += `--- [群聊任务] ---\n`;
+            systemPrompt += `你需要扮演群聊中的AI角色（除了用户${userProfile.name}），根据刚才的对话内容，以任意合理的顺序让这些角色发言。\n`;
+            systemPrompt += `【要求】\n`;
+            systemPrompt += `1. 每个角色的发言都要符合当前时间、其人设和记忆，例如高冷的人不会在群里说太多\n`;
+            systemPrompt += `2. 角色之间可以互动、回应、讨论\n`;
+            systemPrompt += `3. 发言顺序要自然合理，不需要固定顺序，可以用 @ 提及其他群友。\n`;
+            systemPrompt += `4. 出于人设、记忆等考虑，部分角色可以不发言，但只少要有一个角色发言\n`;
+            systemPrompt += `5. 总发言数控制在2-7条之间\n`;
+            systemPrompt += `6. 每条发言要自然、口语化，符合群聊氛围\n\n`;
+            systemPrompt += `7. 不要使用(括号)、*Italic* 或其他任何形式描述角色的动作、表情或内心活动。`;
+            
+            // 输出格式要求
+            systemPrompt += `--- [输出格式] ---\n`;
+            systemPrompt += `请严格按照以下JSON格式输出，不要包含任何其他文字：\n`;
+            systemPrompt += `【重要】speaker字段必须使用上面列出的确切角色名字！\n`;
+            systemPrompt += `{\n`;
+            systemPrompt += `  "messages": [\n`;
+            systemPrompt += `    {"speaker": "角色名", "content": "发言内容"},\n`;
+            systemPrompt += `    {"speaker": "角色名", "content": "发言内容"}\n`;
+            systemPrompt += `  ]\n`;
+            systemPrompt += `}\n\n`;
         }
 
         // 添加自定义提示词
@@ -109,101 +162,117 @@ class PromptBuilder {
             systemPrompt += `--- [自定义行为指令] ---\n${contact.customPrompts}\n\n`;
         }
         
+        // 添加实时情景信息
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const day = now.getDate().toString().padStart(2, '0');
+        const hours = now.getHours().toString().padStart(2, '0');
+        const minutes = now.getMinutes().toString().padStart(2, '0');
+        const currentTimeString = `${year}年${month}月${day}日 ${hours}:${minutes}`;
+        
+        systemPrompt += `--- [实时情景信息] ---\n`;
+        systemPrompt += `[重要系统指令：当前的标准北京时间是"${currentTimeString}"。当用户询问时间时，你必须根据这个时间来回答。]\n`;
+        if (window.currentMusicInfo && window.currentMusicInfo.isPlaying) {
+            systemPrompt += `[系统提示：用户正在听歌，当前歌曲是《${window.currentMusicInfo.songName}》，正在播放的歌词是："${window.currentMusicInfo.lyric}"]\n`;
+        }
+        
+        // 特殊事件提醒 - 检查是否为特殊日期
+        let eventMessage = '';
+        if (month === '08' && day === '29') {
+            eventMessage = '今天是中国传统节日【七夕节】。可以视情况提起。';
+        }
+        // 可以在这里添加更多特殊事件检查
+        
+        if (eventMessage) {
+            systemPrompt += `---[节日提醒]---\n${eventMessage}\n---[节日提醒结束]---\n`;
+        }
+        
+        systemPrompt += `\n`;
+
         // 添加特殊能力模块
         systemPrompt += `--- [你的特殊能力与使用规则] ---\n`;
         systemPrompt += this._buildRedPacketInstructions();
         systemPrompt += this._buildEmojiInstructions(emojis);
         systemPrompt += this._buildVoiceInstructions(contact, apiSettings);
+        
+        // 添加输出格式规则（仅私聊需要）
+        if (currentContact.type !== 'group') {
+            systemPrompt += this._buildOutputFormatInstructions();
+        }
 
         return systemPrompt;
     }
 
     /**
-     * 【已修复】构建发送给API的消息历史记录
+     * 构建消息历史
      */
-    buildMessageHistory(currentContact, apiSettings, userProfile, contacts, contact, emojis, turnContext = [], includeRuntimeContext = true, retrievedMemoryFacts = [], options = {}) {
-        const {
-            includeFullMemoryTableInMainPrompt = false,
-            memoryPreviewMaxChars = 0,
-            keepLatestUserMessageLast = true
-        } = options || {};
-
+    buildMessageHistory(currentContact, apiSettings, userProfile, contacts, contact, emojis, turnContext = []) {
         const messages = [];
-        // 1. 获取用户设置的基础上下文长度（例如 30）
-        const baseCount = apiSettings.contextMessageCount;
-        
-        // 2. 设定缓冲步长：固定为 50 条，减少高频互动时的截断频率
-        const step = 50;
-        
-        // 3. 计算当前消息总数
-        const total = currentContact.messages.length;
-        
-        // 4. 计算超出的部分
-        const over = Math.max(0, total - baseCount);
-        
-        // 5. 计算应该丢弃的消息数量（按 step 步进）
-        let dropCount = Math.floor(over / step) * step;
-        
-        // 6. 【关键安全策略】如果截断后，剩下的第一条消息是 AI(assistant) 发的，
-        // 则少截断一条，确保丢弃后留下的上下文始终以 User 消息开头
-        if (dropCount > 0 && dropCount < total) {
-            if (currentContact.messages[dropCount].role === 'assistant') {
-                dropCount -= 1;
-            }
-        }
-        
-        // 7. 进行截取
-        const recentMessages = currentContact.messages.slice(dropCount);
+        const recentMessages = currentContact.messages.slice(-apiSettings.contextMessageCount);
         
         recentMessages.forEach(msg => {
-            // 根据角色获取发送者名称
-            const senderName = msg.role === 'user' 
-                ? (userProfile?.name || '用户') 
-                : (contacts.find(c => c.id === msg.senderId)?.name || contact.name);
-            
-            let content = ''; // 初始化内容变量
+            const senderName = msg.role === 'user' ? (userProfile?.name || userProfile?.nickname || '用户') : (contacts.find(c => c.id === msg.senderId)?.name || contact.name);
+            let content = msg.content;
 
-            // 根据消息类型处理内容
-            if (msg.type === 'red_packet') {
-                try {
-                    const p = JSON.parse(msg.content);
-                    // 1. 判断红包发送者是谁
-                    const packetSenderText = msg.role === 'user' ? '用户' : '你'; // 对AI来说，assistant就是"你"
+            // 处理红包消息
+            if (msg.type === 'red_packet') { 
+                try { 
+                    const p = JSON.parse(content);
+                    // 确保金额和消息都存在且有效
+                    if (p.amount !== undefined && p.message !== undefined) {
+                        const isUserSent = msg.role === 'user';
+                        const senderDesc = isUserSent ? `User(${userProfile?.name || '用户'})` : `你(${senderName})`;
+                        const finalRole = isUserSent ? 'user' : 'assistant';
+                        
+                        messages.push({ 
+                            role: finalRole,
+                            content: `[${senderDesc}发送了一个金额为${p.amount}元的红包，留言："${p.message}"]` 
+                        }); 
+                    } else {
+                        const isUserSent = msg.role === 'user';
+                        const senderDesc = isUserSent ? `User(${userProfile?.name || '用户'})` : `你(${senderName})`;
+                        const finalRole = isUserSent ? 'user' : 'assistant';
+                        
+                        messages.push({ 
+                            role: finalRole, 
+                            content: `[${senderDesc}发送了一个红包]` 
+                        }); 
+                    }
+                } catch(e) {
+                    console.warn('解析红包数据失败:', e, 'content:', content);
+                    const isUserSent = msg.role === 'user';
+                    const senderDesc = isUserSent ? `User(${userProfile?.name || '用户'})` : `你(${senderName})`;
+                    const finalRole = isUserSent ? 'user' : 'assistant';
                     
-                    // 2. 构建正确的描述文本
-                    const packetContent = `[${packetSenderText}发送了一个金额为${p.amount}元的红包，留言："${p.message}"]`;
-
-                    // 3. 使用消息本身的 role，而不是写死的 'user'
-                    messages.push({
-                        role: msg.role,
-                        content: packetContent
-                    });
-                } catch (e) {
-                    const packetSenderText = msg.role === 'user' ? '用户' : '你';
-                    messages.push({
-                        role: msg.role, // 同样修正这里的 role
-                        content: `[${packetSenderText}发送了一个红包]`
-                    });
+                    messages.push({ 
+                        role: finalRole, 
+                        content: `[${senderDesc}发送了一个红包]` 
+                    }); 
                 }
-                return; // 处理完后跳过后续逻辑，进入下一条消息循环
+                return; // 跳过此次循环的后续步骤
             }
             
-            // ====================== 核心修改点在这里 ======================
-            if (msg.type === 'emoji') {
-                // 对于新格式的表情消息，msg.content 本身就是表情的含义，例如 "开心"
-                // 我们直接用它来构建AI看的懂的标签
-                content = `<emoji>${msg.content}</emoji>`;
-            } 
-            // 对于文本消息，我们检查里面是否包含旧的Base64格式表情并替换
-            else if (msg.type === 'text') {
+            // 处理文本消息
+            if (msg.type === 'text') {
                 content = this._replaceBase64WithEmoji(msg.content, emojis);
+            } 
+            // 处理表情消息
+            else if (msg.type === 'emoji') {
+                // 处理新格式 [emoji:tag]
+                if (msg.content.startsWith('[emoji:') && msg.content.endsWith(']')) {
+                    content = msg.content; // 已经是标签格式，直接使用
+                } else {
+                    // 处理旧格式的URL
+                    const foundEmoji = emojis.find(e => e.url === msg.content || e.tag === msg.content || e.meaning === msg.content);
+                    content = `[emoji:${foundEmoji?.tag || foundEmoji?.meaning || '未知表情'}]`;
+                }
             }
-            // ====================== 修改结束 ======================
             
-            // 构建最终的消息内容（群聊时加上发言人前缀）
+            // 构建最终的消息内容
             const finalContent = currentContact.type === 'group' ? `${senderName}: ${content}` : content;
             
-            // 确保内容不为空再添加到历史记录
+            // 确保内容不为空
             if (finalContent && finalContent.trim()) {
                 messages.push({ 
                     role: msg.role, 
@@ -212,34 +281,47 @@ class PromptBuilder {
             }
         });
 
-        // 群聊的上下文逻辑保持不变
+        // 添加群聊上下文
         if (turnContext.length > 0) {
             messages.push({role: 'user', content: '--- 以下是本回合刚刚发生的对话 ---'});
             turnContext.forEach(msg => {
                 const senderName = contacts.find(c => c.id === msg.senderId)?.name || '未知成员';
-                let content = '';
+                let content = msg.content;
 
-                if (msg.type === 'emoji') {
-                    // 同样需要修正这里的逻辑
-                    content = `<emoji>${msg.content}</emoji>`;
+                if (msg.type === 'red_packet') {
+                    try {
+                        const p = JSON.parse(content);
+                        // 根据消息的原始role决定发送者描述格式
+                        const isUserSent = msg.role === 'user';
+                        const senderDesc = isUserSent ? `User(${userProfile?.name || '用户'})` : `你(${senderName})`;
+                        content = `${senderDesc}发送了金额为${p.amount}元的红包："${p.message}"`;
+                    } catch(e) {
+                        const isUserSent = msg.role === 'user';
+                        const senderDesc = isUserSent ? `User(${userProfile?.name || '用户'})` : `你(${senderName})`;
+                        content = `${senderDesc}发送了红包`;
+                    }
                 } else if (msg.type === 'text') {
                     content = this._replaceBase64WithEmoji(msg.content, emojis);
-                } else if (msg.type === 'red_packet') {
-                    try {
-                        const p = JSON.parse(msg.content);
-                        // 根据发送者角色决定文本
-                        const senderVerb = msg.role === 'user' ? '发送' : '回赠';
-                        content = `${senderVerb}了金额为${p.amount}元的红包："${p.message}"`;
-                    } catch(e) {
-                        const senderVerb = msg.role === 'user' ? '发送' : '回赠';
-                        content = `${senderVerb}了红包`;
+                } else if (msg.type === 'emoji') {
+                    // 处理新格式 [emoji:tag]
+                    if (msg.content.startsWith('[emoji:') && msg.content.endsWith(']')) {
+                        const tag = msg.content.slice(7, -1);
+                        const foundEmoji = emojis.find(e => e.tag === tag || e.meaning === tag);
+                        content = `[表情:${foundEmoji?.meaning || foundEmoji?.tag || tag}]`;
+                    } else {
+                        // 处理旧格式的URL
+                        const foundEmoji = emojis.find(e => e.url === msg.content || e.tag === msg.content || e.meaning === msg.content);
+                        content = `[表情:${foundEmoji?.meaning || foundEmoji?.tag || '未知表情'}]`;
                     }
                 }
                 
-                if (content && content.trim()) {
+                // 构建turnContext消息内容，根据群聊状态决定是否添加发送者名字
+                const finalTurnContent = currentContact.type === 'group' ? `${senderName}: ${content}` : content;
+                
+                if (finalTurnContent && finalTurnContent.trim()) {
                     messages.push({ 
                         role: msg.role, 
-                        content: `${senderName}: ${content}` 
+                        content: finalTurnContent 
                     });
                 }
             });
@@ -248,113 +330,17 @@ class PromptBuilder {
         
         // 确保返回的messages数组不为空
         if (messages.length === 0) {
-            messages.push({ role: 'user', content: '开始对话' });
-        }
-
-        if (includeRuntimeContext) {
-            const runtimeContextBlock = this._buildRuntimeContextBlock(currentContact);
-            const thinkMode = currentContact?.thinkMode || 'default';
-            let thinkMarker = '';
-            if (thinkMode === 'inner_os') {
-                thinkMarker = this.INNER_OS_MARKER;
-            } else if (thinkMode === 'no_inner_os') {
-                thinkMarker = this.NO_INNER_OS_MARKER;
-            }
-
-            let memoryContext = '';
-            const memoryInfoRaw = (currentContact.memoryTableContent || '').trim();
-
-            if (includeFullMemoryTableInMainPrompt && memoryInfoRaw) {
-                let memoryInfo;
-                if (memoryPreviewMaxChars > 0) {
-                    if (memoryInfoRaw.length > memoryPreviewMaxChars) {
-                        const headLen = Math.floor(memoryPreviewMaxChars * 0.6);
-                        const tailLen = Math.floor(memoryPreviewMaxChars * 0.4);
-                        memoryInfo = memoryInfoRaw.slice(0, headLen) + '\n...\n' + memoryInfoRaw.slice(-tailLen);
-                    } else {
-                        memoryInfo = memoryInfoRaw;
-                    }
-                } else {
-                    memoryInfo = memoryInfoRaw;
-                }
-
-                memoryContext = `\n\n--- [当前记忆摘要] ---\n以下是当前记忆的精简视图，仅供参考，不要直接复制输出：\n<current_memory_summary>\n${memoryInfo}\n</current_memory_summary>\n`;
-            }
-
-            let relevantFactsSection = '';
-            if (Array.isArray(retrievedMemoryFacts) && retrievedMemoryFacts.length > 0 && typeof window.buildRelevantMemoryFactsBlock === 'function') {
-                relevantFactsSection = '\n\n' + window.buildRelevantMemoryFactsBlock(retrievedMemoryFacts);
-            }
-
-            const extraContext = `${memoryContext}${relevantFactsSection}${runtimeContextBlock}${thinkMarker}`.trim();
-            if (extraContext) {
-                const runtimeMessages = [
-                    { role: 'assistant', content: '（系统环境检测正常，我已读取最新记忆与时间状态）' },
-                    { role: 'user', content: `[System Context / 系统实时状态]\n${extraContext}` }
-                ];
-
-                if (keepLatestUserMessageLast) {
-                    let insertIndex = -1;
-                    for (let i = messages.length - 1; i >= 0; i--) {
-                        if (messages[i].role === 'user') {
-                            insertIndex = i;
-                            break;
-                        }
-                    }
-                    if (insertIndex >= 0) {
-                        messages.splice(insertIndex, 0, ...runtimeMessages);
-                    } else {
-                        messages.push(...runtimeMessages);
-                    }
-                } else {
-                    messages.push(...runtimeMessages);
-                }
-            }
+            console.warn('构建的消息历史为空，添加默认消息');
+            messages.push({
+                role: 'user',
+                content: '开始对话'
+            });
         }
 
         return messages;
     }
 
-    _buildRuntimeContextBlock(currentContact) {
-        const now = new Date();
-        const year = now.getFullYear();
-        const month = (now.getMonth() + 1).toString().padStart(2, '0');
-        const day = now.getDate().toString().padStart(2, '0');
-        const hours = now.getHours();
-        const currentTimeString = `${year}年${month}月${day}日 ${hours}点左右`;
-
-        let timeOfDayDescription = '现在';
-        if (hours >= 23 || hours < 5) timeOfDayDescription = '深夜';
-        else if (hours >= 18) timeOfDayDescription = '晚上';
-        else if (hours >= 14) timeOfDayDescription = '下午';
-        else if (hours >= 11) timeOfDayDescription = '中午';
-        else if (hours >= 5) timeOfDayDescription = '早上';
-
-        let timeGapPrompt = '';
-        const messageHistory = currentContact?.messages;
-        if (messageHistory && messageHistory.length > 0) {
-            const lastMessage = messageHistory[messageHistory.length - 1];
-            const lastMessageTime = new Date(lastMessage.time);
-            const timeDiff = now.getTime() - lastMessageTime.getTime();
-
-            if (timeDiff > 120000) {
-                const timeGapString = this._formatTimeDifference(timeDiff);
-                timeGapPrompt = `[重要系统指令：距离你们上次对话已经过去了"${timeGapString}"。你要根据这个时间间隔，结合你的性格做出自然的反应。例如，如果很久没聊，可以表示惊讶或思念；如果只是几分钟，就正常衔接对话。]\n`;
-            }
-        }
-
-        let runtimeContext = `\n\n--- [实时情景信息] ---\n`;
-        runtimeContext += `[重要系统指令：当前的标准北京时间是"${currentTimeString}"，现在是**${timeOfDayDescription}**。你要结合这个具体时间点和时段（例如深夜、下午）来进行回复，让对话更真实。例如，在深夜关心用户或提醒TA早点休息。]\n`;
-        runtimeContext += timeGapPrompt;
-
-        if (window.currentMusicInfo && window.currentMusicInfo.isPlaying) {
-            runtimeContext += `[系统提示：用户正在听歌，当前歌曲是《${window.currentMusicInfo.songName}》，正在播放的歌词是："${window.currentMusicInfo.lyric}"]\n`;
-        }
-
-        return `${runtimeContext}\n`;
-    }
-
-    buildWeiboPrompt(contactId, hashtag, count, contact, userProfile, contacts, emojis, memoryTableContent) {
+    async buildWeiboPrompt(contactId, relations, relationDescription, hashtag, count, contact, userProfile, contacts, emojis) {
         const forumRoles = [
             { name: '杠精', description: '一个总是喜欢抬杠，对任何观点都持怀疑甚至否定态度的角色，擅长从各种角度进行反驳。' },
             { name: 'CP头子', description: '一个狂热的CP粉丝，无论原帖内容是什么，总能从中解读出CP的糖，并为此感到兴奋。' },
@@ -372,13 +358,12 @@ class PromptBuilder {
         // 随机选择1-3个用户创建的角色作为额外的评论者
         let userCharacterPromptPart = '';
         const potentialCommenters = contacts.filter(c => c.id !== contactId && c.type === 'private');
-        let selectedUserCharacters = [];
         if (potentialCommenters.length > 0) {
             const maxUserCharacters = Math.min(potentialCommenters.length, 3);
             const userCharactersToSelectCount = Math.floor(Math.random() * maxUserCharacters) + 1; // 保底 1 个
             
             const shuffledCommenters = [...potentialCommenters].sort(() => 0.5 - Math.random());
-            selectedUserCharacters = shuffledCommenters.slice(0, userCharactersToSelectCount);
+            const selectedUserCharacters = shuffledCommenters.slice(0, userCharactersToSelectCount);
     
             if (selectedUserCharacters.length > 0) {
                 const userCharacterDescriptions = selectedUserCharacters.map(c => `【${c.name}】（人设：${c.personality}）`).join('、');
@@ -389,69 +374,112 @@ class PromptBuilder {
         // 组合成最终的评论生成指令
         const finalCommentPrompt = `${genericRolePromptPart}。${userCharacterPromptPart}`;
     
+        // 获取全局记忆
+        let globalMemory = '';
+        if (window.characterMemoryManager) {
+            globalMemory = await window.characterMemoryManager.getGlobalMemory();
+        }
+        
+        // 获取发帖角色的记忆
+        let characterMemory = '';
+        if (window.characterMemoryManager) {
+            const memory = await window.characterMemoryManager.getCharacterMemory(contact.id);
+            if (memory) {
+                characterMemory = memory;
+            }
+        }
+        
         const userRole = `人设：${userProfile.name}, ${userProfile.personality || '用户'}`;
         const charRole = `人设：${contact.name}, ${contact.personality}`;
-        
-        // 【核心修复】在这里加上这一行代码
-        const recentMessages = (contact.messages || []).slice(-10);
-        
+        const recentMessages = contact.messages.slice(-10);
         const background = recentMessages.map(msg => {
             const sender = msg.role === 'user' ? userProfile.name : contact.name;
             let content = msg.content;
             
             if (msg.type === 'emoji') {
-                // 直接使用msg.content作为表情含义
-                content = `<emoji>${msg.content}</emoji>`;
+                // 处理新格式 [emoji:tag]
+                if (msg.content.startsWith('[emoji:') && msg.content.endsWith(']')) {
+                    content = msg.content; // 已经是标签格式，直接使用
+                } else {
+                    // 处理旧格式的URL
+                    const foundEmoji = emojis.find(e => e.url === msg.content || e.tag === msg.content || e.meaning === msg.content);
+                    content = `[emoji:${foundEmoji?.tag || foundEmoji?.meaning || '未知表情'}]`;
+                }
             } else if (msg.type === 'text') {
                 content = this._replaceBase64WithEmoji(msg.content, emojis);
             } else if (msg.type === 'red_packet') {
                 try {
                     const packet = JSON.parse(msg.content);
-                    // 根据消息角色决定动词
-                    const actionVerb = msg.role === 'user' ? '发送' : '回赠';
-                    content = `[${actionVerb}了红包：${packet.message}，金额：${packet.amount}]`;
+                    content = `[发送了红包：${packet.message}，金额：${packet.amount}]`;
                 } catch(e) {
-                    const actionVerb = msg.role === 'user' ? '发送' : '回赠';
-                    content = `[${actionVerb}了红包]`;
+                    content = '[发送了红包]';
                 }
             }
             
             return `${sender}: ${content}`;
         }).join('\n');
     
-        const systemPrompt = `# 角色与背景
-- **你的身份**: 你是 ${contact.name}，人设是: ${contact.personality}。
-- **互动对象**: ${userProfile.name}。
-- **核心任务**: 分析下方的【记忆表格】和【最近对话】，深刻理解你与用户的关系和情感，然后创作帖子的核心内容。
+        let systemPrompt = `你现在要完全沉浸式地扮演 ${contact.name}（${contact.personality}），基于你们的聊天历史和关系，以 ${contact.name} 的口吻和视角发表论坛帖子。
 
-- **【记忆表格】**:
-${memoryTableContent || '无共同记忆。'}
+# 重要身份约束 ⚠️
+- 你必须且只能以 ${contact.name} 的身份发帖，绝不能以 ${userProfile.name} 的身份发帖
+- 你是在模拟 ${contact.name}，不是 ${userProfile.name}
+- 所有帖子的 "author_type" 必须固定设置为 "Char"，永远不要使用 "User"
+- 记住：你是 ${contact.name}，从 ${contact.name} 的视角看待 ${userProfile.name}
 
-- **【最近对话背景】**: 
-${background}
+`;
+        
+        // 添加全局记忆
+        if (globalMemory) {
+            systemPrompt += `--- 全局记忆 ---
+${globalMemory}
+--- 结束 ---
 
-# 你的输出任务
-你的唯一任务是生成一个**纯粹的JSON数据对象**，用于填充一个已有的帖子模板。你绝对不能输出任何JSON之外的文字、解释或Markdown标记。
+`;
+        }
+        
+        // 添加角色记忆（只有该角色了解）
+        if (characterMemory) {
+            systemPrompt += `--- 角色记忆（只有${contact.name}了解） ---
+${characterMemory}
+--- 结束 ---
 
-请生成以下字段对应的内容：
+`;
+        }
+        
+        systemPrompt += `# 设定
+    - User: ${userRole}
+    - Char: ${charRole}
+    - 他们的关系是: ${relations}（${relationDescription}）
+    - 背景设定: (根据以下最近的十条聊天记录)
+    ${background}
 
-1.  \`post_content\`: (字符串) 帖子的正文内容。
-2.  \`image_description\`: (字符串) 配图的文字描述。
-3.  \`source_topic\`: (字符串) 一个符合帖子主题的、有趣的"研究社"名称 (例如: "深夜食堂", "遗迹探索")。
-4.  \`comments\`: (JSON数组) 一个包含 ${selectedRoles.length} 到 ${selectedRoles.length + (selectedUserCharacters ? selectedUserCharacters.length : 0)} 条评论的数组。每条评论都必须是一个包含 \`commenter_name\`, \`commenter_type\`, \`comment_content\` 三个字段的对象。
+    # 要求
+    1. 根据最近的对话内容、角色性格和他们的关系，生成${count}篇论坛帖子。
+    2. ${finalCommentPrompt}
+    3. 模仿自然网络语气，适当使用流行语，要有网感。
+    4. 评论可以有不同观点和立场。
+    5. 为每篇帖子提供一个简短的图片内容描述文字。
+    6. 必须以一个JSON对象格式输出，回答**只包含JSON**，不要包含任何其他文字或markdown标记。
+    7. 对于每一条评论，都必须包含 "commenter_name", "commenter_type", 和 "comment_content" 三个字段。 "commenter_type" 应该准确反映评论者的角色（例如："CP头子", "乐子人", "好友"）。
+    8. 内容要求：每条评论必须包含实际的文字内容（至少5字），不能只是单独的emoji或表情符号
 
-# 评论者要求
-${finalCommentPrompt}
-
-# 输出格式 (必须严格遵守此JSON结构)
-{
-  "post_content": "...",
-  "image_description": "...",
-  "source_topic": "...",
-  "comments": [
-    { "commenter_name": "...", "commenter_type": "...", "comment_content": "..." }
-  ]
-}`;
+    # 输出格式 (必须严格遵守此JSON结构)
+    {
+    "relation_tag": "${hashtag}",
+    "posts": [
+        {
+        "author_type": "Char",
+        "post_content": "帖子的内容...",
+        "image_description": "图片的描述文字...",
+        "comments": [
+            { "commenter_name": "路人昵称1", "commenter_type": "CP头子", "comment_content": "评论内容1..." },
+            { "commenter_name": "路人昵称2", "commenter_type": "乐子人", "comment_content": "评论内容2..." }
+        ]
+        }
+    ]
+    }
+    `;
         return systemPrompt;
     }
 
@@ -470,28 +498,88 @@ ${finalCommentPrompt}
     }
 
     /**
-     * 构建朋友圈评论生成提示词
+     * 构建朋友圈评论生成提示词 - 使用所有用户创建的角色
      */
-    buildCommentsPrompt(momentContent) {
-        return `你是一个朋友圈评论生成器，需要根据朋友圈文案生成3-5条路人评论。
+    async buildCommentsPrompt(momentContent, contacts) {
+        // 获取全局记忆
+        let globalMemory = '';
+        if (window.characterMemoryManager) {
+            globalMemory = await window.characterMemoryManager.getGlobalMemory();
+        }
+        
+        // 获取所有用户创建的角色
+        const allCharacters = contacts ? contacts.filter(c => c.type === 'private') : [];
+        
+        // 为所有角色获取记忆
+        let charactersMemory = '';
+        if (allCharacters.length > 0 && window.characterMemoryManager) {
+            const memoryPromises = allCharacters.map(async (contact) => {
+                const memory = await window.characterMemoryManager.getCharacterMemory(contact.id);
+                return memory ? `【${contact.name}的记忆（只有${contact.name}了解）】：${memory}` : null;
+            });
+            const memories = await Promise.all(memoryPromises);
+            charactersMemory = memories.filter(m => m).join('\n\n');
+        }
+        
+        let prompt = `你是一个朋友圈评论生成器，需要为朋友圈文案生成评论。\n\n`;
+        
+        // 添加全局记忆
+        if (globalMemory) {
+            prompt += `--- 全局记忆 ---\n${globalMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        // 添加角色记忆
+        if (charactersMemory) {
+            prompt += `--- 角色记忆 ---\n${charactersMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        // 构建角色信息
+        if (allCharacters.length > 0) {
+            const characterDescriptions = allCharacters.map(c => 
+                `【${c.name}】（人设：${c.personality}）`
+            ).join('、');
+            
+            prompt += `# 评论角色设定
+你需要为以下所有角色生成评论：${characterDescriptions}
+
 要求：
-1. 根据文案内容生成3-5条相关评论
-2. 路人角色类型包括：CP头子、乐子人、搅混水的、理性分析党、颜狗等
-3. 模仿网络语气，使用当代流行语。
-4. 评论要有不同观点和立场
-5. 每条评论至少15字
-6. 评论者名称使用：路人甲、小明、小红、隔壁老王、神秘网友、热心市民、吃瓜群众等
-7. 必须以一个JSON对象格式输出，不要包含任何其他解释性文字或markdown标记。
+1. 为每个角色都生成一条评论，总共${allCharacters.length}条评论
+2. 每条评论都要符合对应角色的人设和性格特点
+3. 根据角色记忆和全局记忆来生成更符合角色背景的评论
+4. 评论要针对朋友圈内容，体现角色的个性和观点
+5. 模仿网络语气，使用当代流行语，但要符合角色特色
+6. 每条评论5-50字之间
+7. 根据角色性格和朋友圈内容，决定是否点赞（like: true/false）
+8. 必须以JSON格式输出，不要包含任何其他解释性文字或markdown标记
+9. 内容要求：每条评论必须包含实际的文字内容（至少5字），不能只是单独的emoji或表情符号
 
 输出格式 (必须严格遵守此JSON结构):
 {
   "comments": [
-    { "author": "路人甲", "content": "评论内容1..." },
-    { "author": "小明", "content": "评论内容2..." }
+    { "author": "${allCharacters[0]?.name || '角色1'}", "content": "评论内容1...", "like": true }${allCharacters.length > 1 ? `,
+    { "author": "${allCharacters[1]?.name || '角色2'}", "content": "评论内容2...", "like": false }` : ''}${allCharacters.length > 2 ? `
+    // ... 更多角色的评论` : ''}
   ]
 }
 
-朋友圈文案：${momentContent}`;
+点赞规则：
+- 根据角色性格决定点赞概率（活泼外向的角色更容易点赞）
+- 根据朋友圈内容的积极程度决定（正面内容更容易被点赞）
+- 大约50-70%的角色会点赞`;
+        } else {
+            // 如果没有角色，返回提示
+            prompt += `# 注意
+当前没有创建任何角色，无法生成角色评论。请先创建一些角色。
+
+输出格式:
+{
+  "comments": []
+}`;
+        }
+        
+        prompt += `\n\n朋友圈文案：${momentContent}`;
+        
+        return prompt;
     }
 
     /**
@@ -528,7 +616,7 @@ ${userReply}
     }
 
     /**
-     * 构建当AI被@时生成回复的提示词
+     * 构建当AI被 @ 时生成回复的提示词
      */
     buildMentionReplyPrompt(postData, mentioningComment, mentionedContact, contacts, userProfile) {
         const allComments = postData.comments.map(c => `${c.commenter_name}: ${c.comment_content}`).join('\n');
@@ -558,7 +646,7 @@ ${userReply}
     /**
      * 构建手动发帖的提示词 - 用于为用户手动输入的帖子生成评论
      */
-    buildManualPostPrompt(authorName, relationTag, postContent, imageDescription, userProfile, contacts, emojis) {
+    async buildManualPostPrompt(authorName, relationTag, postContent, imageDescription, userProfile, contacts, emojis) {
         const forumRoles = [
             { name: '杠精', description: '一个总是喜欢抬杠，对任何观点都持怀疑甚至否定态度的角色，擅长从各种角度进行反驳。' },
             { name: 'CP头子', description: '一个狂热的CP粉丝，无论原帖内容是什么，总能从中解读出CP的糖，并为此感到兴奋。' },
@@ -590,12 +678,39 @@ ${userReply}
             }
         }
 
+        // 获取全局记忆
+        let globalMemory = '';
+        if (window.characterMemoryManager) {
+            globalMemory = await window.characterMemoryManager.getGlobalMemory();
+        }
+        
+        // 为参与评论的用户角色获取记忆
+        let userCharactersMemory = '';
+        if (potentialCommenters.length > 0 && window.characterMemoryManager) {
+            const memoryPromises = potentialCommenters.slice(0, 2).map(async (contact) => {
+                const memory = await window.characterMemoryManager.getCharacterMemory(contact.id);
+                return memory ? `【${contact.name}的记忆（只有${contact.name}了解）】：${memory}` : null;
+            });
+            const memories = await Promise.all(memoryPromises);
+            userCharactersMemory = memories.filter(m => m).join('\n\n');
+        }
+        
         // 组合成最终的评论生成指令
         const finalCommentPrompt = userCharacterPromptPart ? `${genericRolePromptPart} ${userCharacterPromptPart}` : genericRolePromptPart;
 
-        const systemPrompt = `你需要为一条用户手动发布的论坛帖子生成评论。
-
-# 帖子信息
+        let systemPrompt = `你需要为一条用户手动发布的论坛帖子生成评论。\n\n`;
+        
+        // 添加全局记忆
+        if (globalMemory) {
+            systemPrompt += `--- 全局记忆 ---\n${globalMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        // 添加用户角色记忆
+        if (userCharactersMemory) {
+            systemPrompt += `--- 角色记忆 ---\n${userCharactersMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        systemPrompt += `# 帖子信息
 - 发帖人：${authorName}
 - 话题标签：${relationTag}
 - 帖子内容：${postContent}
@@ -605,9 +720,10 @@ ${userReply}
 1. ${finalCommentPrompt}
 2. 模仿自然网络语气，适当使用流行语，要有网感。
 3. 评论可以有不同观点和立场，针对帖子内容进行回复。
-4. 每条评论至少10字，最多50字。
+4. 每条评论至少5字，最多50字。
 5. 必须以一个JSON对象格式输出，回答**只包含JSON**，不要包含任何其他文字或markdown标记。
 6. 对于每一条评论，都必须包含 "commenter_name"、"commenter_type" 和 "comment_content" 三个字段。
+7. 内容要求：每条评论必须包含实际的文字内容（至少5字），不能只是单独的emoji或表情符号
 
 # 输出格式 (必须严格遵守此JSON结构)
 {
@@ -617,6 +733,136 @@ ${userReply}
   ]
 }`;
 
+        return systemPrompt;
+    }
+
+    /**
+     * 构建朋友圈内容和评论一次性生成提示词
+     */
+    async buildMomentAndCommentsPrompt(contact, userProfile, apiSettings, contacts, topic = '') {
+        // 获取全局记忆
+        let globalMemory = '';
+        if (window.characterMemoryManager) {
+            globalMemory = await window.characterMemoryManager.getGlobalMemory();
+        }
+        
+        // 获取发布角色的记忆
+        let characterMemory = '';
+        if (window.characterMemoryManager) {
+            const memory = await window.characterMemoryManager.getCharacterMemory(contact.id);
+            if (memory) {
+                characterMemory = memory;
+            }
+        }
+        
+        // 获取所有其他角色的记忆（用于评论生成）
+        const allCharacters = contacts ? contacts.filter(c => c.type === 'private' && c.id !== contact.id) : [];
+        let otherCharactersMemory = '';
+        if (allCharacters.length > 0 && window.characterMemoryManager) {
+            const memoryPromises = allCharacters.map(async (c) => {
+                const memory = await window.characterMemoryManager.getCharacterMemory(c.id);
+                return memory ? `【${c.name}的记忆（只有${c.name}了解）】：${memory}` : null;
+            });
+            const memories = await Promise.all(memoryPromises);
+            otherCharactersMemory = memories.filter(m => m).join('\n\n');
+        }
+        
+        let systemPrompt = `你需要为角色${contact.name}生成一条朋友圈内容，并为这条朋友圈生成评论。\n\n`;
+        
+        // 添加全局记忆
+        if (globalMemory) {
+            systemPrompt += `--- 全局记忆 ---\n${globalMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        // 添加发布角色的记忆
+        if (characterMemory) {
+            systemPrompt += `--- ${contact.name}的记忆（只有${contact.name}了解） ---\n${characterMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        // 添加其他角色的记忆
+        if (otherCharactersMemory) {
+            systemPrompt += `--- 其他角色记忆 ---\n${otherCharactersMemory}\n--- 结束 ---\n\n`;
+        }
+        
+        // 构建聊天背景
+        let chatContext = '';
+        if (contact.messages && contact.messages.length > 0) {
+            const recentMessages = contact.messages.slice(-apiSettings.contextMessageCount);
+            chatContext = recentMessages.map(msg => {
+                if (msg.role === 'user') {
+                    return `${userProfile.name}: ${msg.content}`;
+                } else {
+                    return `${contact.name}: ${msg.content}`;
+                }
+            }).join('\n');
+        }
+        
+        systemPrompt += `# 角色设定
+- 发布者：${contact.name}
+- 人设：${contact.personality}
+- 用户：${userProfile.name}
+- 用户人设：${userProfile.personality || '用户'}
+${topic ? `- 朋友圈主题：${topic}` : ''}
+
+# 最近聊天记录
+${chatContext || '暂无聊天记录'}
+
+# 评论角色设定
+`;
+        
+        if (allCharacters.length > 0) {
+            const characterDescriptions = allCharacters.map(c => 
+                `【${c.name}】（人设：${c.personality}）`
+            ).join('、');
+            
+            systemPrompt += `你需要为以下角色生成评论：${characterDescriptions}
+
+# 要求
+1. 首先生成一条符合${contact.name}人设的朋友圈内容（50字以内）
+2. 根据朋友圈内容生成合适的图片搜索关键词，如果不需要配图则返回null
+3. 然后为这条朋友圈生成${allCharacters.length}条评论，每个角色一条
+4. 朋友圈内容要根据角色记忆、全局记忆和聊天记录来生成
+5. 评论要符合各角色的人设和记忆，针对朋友圈内容进行回复
+6. 模仿网络语气，使用当代流行语，但要符合角色特色
+7. 每条评论5-50字之间
+8. 根据角色性格和朋友圈内容，决定是否点赞（like: true/false）
+9. 图片关键词应该是英文，简洁明确，适合搜索配图
+10. 必须以JSON格式输出，不要包含任何其他解释性文字或markdown标记
+11. 内容要求：每条评论必须包含实际的文字内容（至少5字），不能只是单独的emoji或表情符号
+
+# 输出格式 (必须严格遵守此JSON结构)
+{
+  "content": "朋友圈内容...",
+  "imageKeyword": "图片搜索关键词或null",
+  "comments": [
+    { "author": "${allCharacters[0]?.name || '角色1'}", "content": "评论内容1...", "like": true }${allCharacters.length > 1 ? `,
+    { "author": "${allCharacters[1]?.name || '角色2'}", "content": "评论内容2...", "like": false }` : ''}${allCharacters.length > 2 ? `,
+    // ... 更多角色的评论` : ''}
+  ]
+}
+
+点赞规则：
+- 根据角色性格决定点赞概率（活泼外向的角色更容易点赞）
+- 根据朋友圈内容的积极程度决定（正面内容更容易被点赞）
+- 大约50-70%的角色会点赞`;
+        } else {
+            systemPrompt += `当前没有其他角色，只生成朋友圈内容。
+
+# 要求
+1. 生成一条符合${contact.name}人设的朋友圈内容（50字以内）
+2. 根据朋友圈内容生成合适的图片搜索关键词，如果不需要配图则返回null
+3. 朋友圈内容要根据角色记忆、全局记忆和聊天记录来生成
+4. 图片关键词应该是英文，简洁明确，适合搜索配图
+5. 必须以JSON格式输出
+
+# 输出格式
+{
+  "content": "朋友圈内容...",
+  "imageKeyword": "图片搜索关键词或null",
+  "comments": []
+}`;
+        }
+        
         return systemPrompt;
     }
 
@@ -653,43 +899,66 @@ ${userReply}
         return systemPrompt;
     }
 
+    /**
+     * 构建朋友圈回复提示词
+     */
+    buildMomentReplyPrompt(character, replierName, replyContent, momentContent) {
+        return `你是${character.name}，人设：${character.personality}
+
+${replierName}在你的朋友圈"${momentContent}"下评论或回复了："${replyContent}"
+
+请以${character.name}的身份简短回复，要求：
+1. 符合你的人设
+2. 针对${replierName}的评论进行回应
+3. 5-30字之间
+4. 自然、口语化
+5. 只输出回复内容，不要其他解释`;
+    }
+
     // 私有方法：构建红包指令
     _buildRedPacketInstructions() {
         return `\n\n**能力一：发送红包**\n`
              + `你可以给用户发红包来表达祝贺、感谢或作为奖励。\n`
-             + `要发送红包，你必须严格使用以下格式，并将其作为单独的一行输出：\n`
+             + `要发送红包，你必须严格使用以下格式，并将其作为一条独立的消息（即前后都有 ||| 分隔符）：\n`
              + `\`[red_packet:{"amount":8.88, "message":"恭喜发财！"}]\`\n`
              + `其中 "amount" 是一个 1 到 1000000 之间的数字，"message" 是字符串。\n`
-             + `例如:\n太棒了！\n[red_packet:{"amount":6.66, "message":"奖励你的！"}]\n继续加油哦！\n`
+             + `例如: 太棒了！|||[red_packet:{"amount":6.66, "message":"奖励你的！"}]|||继续加油哦！\n`
              + `你必须自己决定何时发送红包以及红包的金额和留言。这个决定必须完全符合你的人设和当前的对话情景。例如，一个慷慨的角色可能会在用户取得成就时发送一个大红包，而一个节俭的角色可能会发送一个小红包并附上有趣的留言。`;
     }
 
     // 私有方法：构建表情包指令
     _buildEmojiInstructions(emojis) {
-        // 只提取表情含义列表，不包含URL
-        const emojiMeanings = emojis.map(e => e.meaning);
-        const availableEmojisString = emojiMeanings.join(', ');
+        const availableEmojisString = emojis.map(e => `- [emoji:${e.tag || e.meaning}] (含义: ${e.meaning || e.tag})`).join('\n');
         
         return `\n\n**能力二：发送表情包**\n`
-             + `你可以使用以下表情含义来丰富你的表达：${availableEmojisString}\n`
-             + `要发送表情包，你必须严格使用以下格式，并将其作为单独的一行输出。\n`
-             + `格式: \`<emoji>表情含义</emoji>\`\n`
-             + `例如:\n你好呀\n<emoji>开心</emoji>\n今天天气真不错\n`
-             + `**重要提醒：** 你可能会在用户的消息历史中看到 "[发送了表情：...]" 这样的文字，这是系统为了让你理解对话而生成的提示，你绝对不能在你的回复中模仿或使用这种格式。你只能使用 \`<emoji>表情含义</emoji>\` 格式来发送表情。`;
+             + `你可以从下面的列表中选择表情包来丰富你的表达。\n`
+             + `要发送表情包，你必须严格使用以下格式，并将其作为一条独立的消息（即前后都有 ||| 分隔符）。你必须使用表情的"含义"作为占位符，而不是图片URL。\n`
+             + `格式: \`[emoji:表情含义]\`\n`
+             + `例如: 你好呀|||[emoji:开心]|||今天天气真不错\n`
+             + `**重要提醒：** 你可能会在用户的消息历史中看到 "[发送了表情：...]" 这样的文字，这是系统为了让你理解对话而生成的提示，你绝对不能在你的回复中模仿或使用这种格式。你只能使用 \`[emoji:表情含义]\` 格式来发送表情。\n\n`
+             + `可用表情列表:\n${availableEmojisString || '无可用表情'}`;
     }
 
     // 私有方法：构建语音指令
     _buildVoiceInstructions(contact, apiSettings) {
+        // 直接从localStorage读取minimax配置
+        const minimaxGroupId = localStorage.getItem('minimaxGroupId') || '';
+        const minimaxApiKey = localStorage.getItem('minimaxApiKey') || '';
+        
         // 如果没有语音ID或者没有正确配置Minimax的凭证，则不提供语音能力
-         if (!contact?.voiceId || !apiSettings?.minimaxGroupId || !apiSettings?.minimaxApiKey) {
-             return '';
+        if (!contact?.voiceId || !minimaxGroupId || !minimaxApiKey) {
+            return '';
         }
         
         return `\n\n**能力三：发送语音**\n`
              + `你拥有一项特殊能力：发送语音消息。当你认为通过声音更能表达情绪、强调重点、唱歌、讲笑话或模仿特定语气时，你可以选择发送语音。\n\n`
              + `**使用格式：**\n`
-             + `若要发送语音，你必须严格按照以下格式回复，将包含 \`[语音]:\` 标签的内容单独作为一行输出：\n`
-             + `\`[语音]: 你好呀，今天过得怎么样？\`\n\n`
+             + `使用 \`[V]\` 标签放在消息开头表示该条消息是语音。\n\n`
+             + `**单条语音消息：**\n`
+             + `\`[V]你好呀，今天过得怎么样？\`\n\n`
+             + `**多条混合消息：**\n`
+             + `如果你需要发送多条消息，其中部分是语音，格式如下：\n`
+             + `\`第一条文字消息|||[V]第二条语音消息|||[V]第三条语音消息|||第四条文字消息\`\n\n`
              + `**使用场景举例：**\n`
              + `- 当你想表达特别开心或激动的情绪时。\n`
              + `- 当你想用温柔或严肃的语气说话时。\n`
@@ -697,159 +966,93 @@ ${userReply}
              + `- 当你想模仿某个角色的声音时。\n\n`
              + `**注意：**\n`
              + `- **不要**滥用此功能，只在必要或能增强角色扮演效果时使用。\n`
-             + `- \`[语音]:\` 标签本身不会被用户看到，系统会自动将其转换为语音播放器。\n`
-             + `- 如果你不想发送语音，就正常回复，**不要**添加 \`[语音]:\` 标签。`;
+             + `- \`[V]\` 标签本身不会被用户看到，系统会自动将其转换为语音播放器。\n`
+             + `- 如果你不想发送语音，就正常回复，**不要**添加语音标签。\n`
+             + `- 如果要发送多条语音，**必须**在**每一条**语音消息开头都使用 \`[V]\` 标签。`;
     }
 
 
-    // 私有方法：构建输出格式指令 (去除了记忆表相关的强制要求)
+    // 私有方法：构建输出格式指令
     _buildOutputFormatInstructions() {
-        return `\n\n--- [🚨 终极防漏指令：输出格式] ---\n
-警告：你的每一次回复，必须严格按照以下格式输出：
-聊天内容中，**每一个气泡（每一句话）占一行**。
-如果有特殊的内心独白或动作神态，请按照之前的【思考模式要求】使用括号标注。
-绝对不要输出任何无关的系统代码或标签！`;
-    }
-
-    _buildCurrentTurnPriorityInstructions() {
-        return `
-
---- [当前对话优先级规则] ---
-1. 你的回复必须首先回应用户最新一条消息的内容、情绪和意图。
-2. 长期记忆、结构化记忆、世界书和历史设定只能作为辅助背景，不能替代对当前消息的回应。
-3. 如果用户正在问一个当下问题、表达当下情绪、提出当下请求，你必须先接住这个当下内容。
-4. 只有当相关记忆能自然帮助理解当前消息时，才可以使用记忆。
-5. 禁止因为检索到某条长期记忆，就突然转移话题。
-6. 如果记忆和当前用户消息关系不强，请忽略它，不要主动提起。
-7. 你可以把记忆当作“潜台词”，但不要机械复述记忆条目。
-8. 回复顺序应当是：先回应当前消息，再自然结合相关记忆，最后推动对话。
-`;
-    }
-
-    _buildMultiBubbleChatInstructions() {
-        return `
-
---- [多气泡日常聊天强制规则] ---
-1. 每次回复必须拆成至少 5 条聊天气泡，也就是至少 5 行有效输出。
-2. 每一行就是一个独立气泡；禁止把多条气泡写在同一行。
-3. 每条气泡以 10-25 个词为宜；中文可理解为 10-25 个自然词语/短语，尽量控制在 15-45 个汉字左右。
-4. 语气要像真实日常聊天：自然、口语化、有停顿感，可以接话、追问、吐槽、表达轻微情绪。
-5. 不要写成作文、旁白、总结、长段落；不要使用编号、项目符号、Markdown 标题或解释格式。
-6. <emoji>表情含义</emoji> 和 [red_packet:{...}] 必须单独占一行，可以算作一条气泡，但不要为了凑数滥用。
-7. 默认输出 5-8 行。除非系统另有更高优先级要求，否则不得少于 5 行。
-8. 输出中不要出现“气泡1”“第1条”“以下是回复”等元说明，只输出角色真正会发出的聊天内容。
-`;
+        return `\n\n--- 至关重要的输出格式规则 ---\n你的回复必须严格遵守以下格式：\n为了模拟真实的网络聊天，你必须将完整的回复拆分成多个（3到8条）独立的短消息（气泡）。每条消息应尽量简短（例如30字以内）。你必须使用"|||"作为每条短消息之间的唯一分隔符。`;
     }
 
     /**
-     * 新增：构建副模型专属的后台记忆更新提示词
+     * 构建独立的记忆表格更新提示词
      */
-    buildMemoryUpdatePrompt(contact, userProfile) {
-        return `你是一个后台记忆整理引擎。
-你的任务是冷酷、客观地分析用户(${userProfile.name})和角色(${contact.name})的最新对话，提取对长期对话有用的结构化事实，并（可选）输出兼容旧版的 Markdown 记忆表增量。
+    buildMemoryUpdatePrompt(contact, userProfile, currentContact, apiSettings, recentMessages = []) {
+        const memoryInfo = (currentContact.memoryTableContent || '').trim();
+        
+        // 获取最近的对话历史
+        const messageHistory = recentMessages.length > 0 ? recentMessages : 
+            currentContact.messages.slice(-apiSettings.contextMessageCount);
+        
+        const chatContext = messageHistory.map(msg => {
+            const senderName = msg.role === 'user' ? (userProfile?.name || '用户') : contact.name;
+            let content = msg.content;
+            
+            // 处理不同类型的消息
+            if (msg.type === 'red_packet') {
+                try {
+                    const p = JSON.parse(content);
+                    content = `发送了金额为${p.amount}元的红包：\"${p.message}\"`;
+                } catch(e) {
+                    content = '发送了红包';
+                }
+            } else if (msg.type === 'emoji') {
+                content = `[表情:${msg.meaning || '未知表情'}]`;
+            }
+            
+            return `${senderName}: ${content}`;
+        }).join('\n');
 
-【优先输出】你必须首先输出 \`<memory_ops>\`…\`</memory_ops>\`，内部为一个 JSON 对象（不要在外面套数组）。格式如下（字段必须齐全；无内容时用空数组）：
-<memory_ops>
-{
-  "entities": [
-    {
-      "name": "实体名",
-      "type": "person | place | item | event | concept | relationship | preference | promise | other",
-      "aliases": [],
-      "description": "简短说明"
-    }
-  ],
-  "facts_to_add": [
-    {
-      "subject": "主体实体名",
-      "predicate": "关系/属性名，例如 current_location, likes, promised, owns, relationship_with_user",
-      "object": "客体或属性值",
-      "factText": "自然语言事实描述",
-      "type": "profile | current_state | past_event | future_plan | relationship | item | preference | emotional_core | other",
-      "timeScope": "current | long_term | past | future | temporary",
-      "confidence": 0.85,
-      "importance": 0.6
-    }
-  ],
-  "facts_to_invalidate": [
-    {
-      "subject": "主体实体名",
-      "predicate": "需要失效的关系/属性名",
-      "reason": "为什么旧事实失效"
-    }
-  ]
-}
-</memory_ops>
+        // 添加当前时间
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const day = now.getDate().toString().padStart(2, '0');
+        const hours = now.getHours().toString().padStart(2, '0');
+        const minutes = now.getMinutes().toString().padStart(2, '0');
+        const currentTimeString = `${year}年${month}月${day}日 ${hours}:${minutes}`;
 
-记录原则：
-- 只记录对长期对话有用的事实；不要记录普通寒暄、一次性无意义动作。
-- 用户偏好、关系变化、约定、重要物品、地点状态、身份设定、情绪核心优先。
-- 若新事实明显替代旧事实，必须在 facts_to_invalidate 中写明被替代的 subject+predicate。
-- \`<memory_ops>\` 之外不要输出任何解释或对话。
+        let systemPrompt = `你是记忆表格更新助手，需要根据用户(${userProfile.name})和角色(${contact.name})最新的对话内容更新记忆表格。
 
-【兼容旧版】为保持 Markdown 记忆表更新，请在 \`<memory_ops>\` 之后（或最后一行）同时输出 \`<memory_diff>\`…\`</memory_diff>\`，内部为 JSON 数组（操作格式不变）。若无表格变更，必须输出：\`<memory_diff>[]</memory_diff>\`。
+- 当前时间：${currentTimeString}
 
-memory_diff 支持的操作示例：
-[
-  {"op": "update", "section": "现在", "key": "地点", "value": "新地点"},
-  {"op": "append", "section": "过去", "line": "| 人物 | 事件 | 地点 | 时间 |"},
-  {"op": "delete", "section": "现在", "keyword": "旧地点"}
-]
+# 当前记忆表格
+${memoryInfo || window.defaultMemoryTable}
 
-输出顺序要求：先完整的 \`<memory_ops>\` 块，再 \`<memory_diff>\` 块；不要颠倒。`;
+# 最近对话内容
+${chatContext}
+
+# 更新要求
+0. 以用户(${userProfile.name})和角色(${contact.name})的全名记录表格。
+1. 仔细分析对话内容，识别需要记录的信息
+2. 更新【现在】栏目中的地点、人物、时间信息
+3. 更新【重要物品】栏目，添加或修改对话中提到的重要物品
+4. 如果没有新信息需要更新，保持原有内容不变
+5. 时间格式必须为：YYYY年MM月DD日 HH:MM
+6. 只输出完整的更新后记忆表格，使用markdown格式
+7. 表格必须包含所有必要的栏目结构
+8. 记忆表不要太琐碎、冗长
+
+请输出更新后的完整记忆表格：`;
+
+        return systemPrompt;
     }
 
     _replaceBase64WithEmoji(raw, emojis) {
         if (typeof raw !== 'string' || !raw) return raw;
+        
+        // 处理新格式 [emoji:tag] - 直接返回，不需要替换
+        if (raw.includes('[emoji:')) return raw;
+        
+        // 处理旧格式的base64
         const re = /data:image\/[^,\s]+,[A-Za-z0-9+/=]+/g;
         return raw.replace(re, (imgUrl) => {
-        const found = emojis.find(e => e.url === imgUrl);
-        return `[发送了表情：${found?.meaning || '未知'}]`;
+            const found = emojis.find(e => e.url === imgUrl);
+            return `[发送了表情：${found?.meaning || found?.tag || '未知'}]`;
         });
-    }
-    
-    /**
-     * 构建待办事项提醒的提示词
-     * @param {Object} character - 角色信息
-     * @param {Object} userProfile - 用户信息
-     * @param {string} taskText - 待办事项内容
-     * @param {string} taskDate - 待办事项日期时间
-     * @returns {string} - 完整的提示词
-     */
-    buildTodoReminderPrompt(character, userProfile, taskText, taskDate) {
-        return `
-# 角色
-你是一个AI角色，正在与用户互动。
-
-## 你的信息
-- **你的名字**: ${character.name}
-- **你的性格和背景**: ${character.personality}
-
-## 你的记忆
-这是你和用户之间的关键记忆，请在生成内容时参考：
-<memory_table>
-${character.memoryTableContent || '暂无特别记忆'}
-</memory_table>
-
-## 用户信息
-- **用户昵称**: ${userProfile.name}
-- **用户设定**: ${userProfile.personality || '用户未设置详细信息'}
-
-# 任务
-请你扮演 ${character.name}，用 Ta 的人设、口吻和性格，为我生成一条关于待办事项的提醒。
-- 待办事项是: "${taskText}"
-- 这件事计划在 ${new Date(taskDate).toLocaleString('zh-CN')} 左右完成。
-- 你的任务是生成一句简短、口语化、符合人设的提醒。
-- **重要：不要在回复中明确提及具体的日期或时间**，而是用更自然的方式表达提醒，比如"待会儿别忘了..."或"下午记得要去做..."。就好像朋友间的口头提醒一样。
-
-# 要求
-1.  **语气**: 必须完全符合你的角色设定（${character.personality}）。
-2.  **简洁**: 提醒语必须在50个字以内。
-3.  **内容**: 提醒语需要自然地提及待办事项的核心内容"${taskText}"。
-4.  **格式**: 直接输出提醒语，不要包含任何前缀、标签或多余的解释。
-
-请现在根据你的角色，为上述任务生成一句简短、自然的提醒语。
-`;
     }
 }
 

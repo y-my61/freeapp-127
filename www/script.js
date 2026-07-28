@@ -1,642 +1,335 @@
-/*
- * [Whale-LLT]
- * Copyright (C) [2025] [Xuan Jing]
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-// =================================================================
-// 新增：电话通讯功能所需的全局变量
-// =================================================================
-let mediaRecorder = null;
-let audioChunks = [];
-let isCallActive = false;
-let silenceTimeout = null; // 用于检测静音的计时器
+﻿// === 核心应用脚本 ===
 
-// ========== 【新增】AI主动发消息（看门狗机制）变量 ==========
-let proactiveTimer = null;          // 2分钟生成倒计时
-let proactiveRefreshTimer = null;   // 15分钟续命循环
-const PROACTIVE_STORAGE_KEY = 'pendingAiNotification'; 
-const PROACTIVE_WAIT_TIME = 60 * 60 * 1000;      // 1小时 (真正发送前的等待时间)
-const PROACTIVE_TRIGGER_DELAY = 2 * 60 * 1000;   // 2分钟 (用户停留多久后触发生成)
-const PROACTIVE_REFRESH_INTERVAL = 15 * 60 * 1000; // 15分钟 (看门狗刷新间隔)
-
-// =================================================================
-// 新增：用于生成智谱AI JWT Token的辅助函数
-// =================================================================
-/**
- * 根据智谱API Key生成认证用的JWT Token。
- * @param {string} apikey - 从智谱官网获取的API Key (格式为 id.secret)
- * @param {number} exp_seconds - Token的过期时间（秒），默认为3600秒
- * @returns {string} 生成的JWT Token
- */
-function generateToken(apikey, exp_seconds = 3600) {
-    const [id, secret] = apikey.split('.');
-
-    const header = {
-        "alg": "HS256",
-        "sign_type": "SIGN"
-    };
-
-    const now = new Date();
-    const payload = {
-        "api_key": id,
-        "exp": now.getTime() + exp_seconds * 1000,
-        "timestamp": now.getTime(),
-    };
-
-    // Helper to Base64 a string
-    const base64 = (str) => {
-        return CryptoJS.enc.Base64.stringify(str)
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=+$/, '');
-    };
-
-    const encodedHeader = base64(CryptoJS.enc.Utf8.parse(JSON.stringify(header)));
-    const encodedPayload = base64(CryptoJS.enc.Utf8.parse(JSON.stringify(payload)));
-
-    const signature = CryptoJS.HmacSHA256(`${encodedHeader}.${encodedPayload}`, secret);
-    const encodedSignature = base64(signature);
+// 🛡️ 全局错误处理器 - 处理第三方库和浏览器兼容性问题
+window.addEventListener('error', function(event) {
+    // 过滤掉已知的无害错误
+    if (event.message && event.message.includes('document.currentScript')) {
+        console.warn('🔧 捕获到 currentScript 兼容性错误，已安全忽略:', event.message);
+        event.preventDefault(); // 阻止错误冒泡到控制台
+        return true;
+    }
     
-    return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
-}
+    // 记录其他真正的错误供调试
+    if (event.error && !event.message.includes('Script error')) {
+        console.error('🐛 全局错误:', {
+            message: event.message,
+            filename: event.filename,
+            line: event.lineno,
+            column: event.colno,
+            error: event.error
+        });
+    }
+});
 
-// =================================================================
-// 新增：用于将文件转换为Base64的辅助函数
-// =================================================================
-/**
- * 将File或Blob对象转换为Base64格式的Data URL。
- * @param {File|Blob} file - 用户选择的文件或Blob对象。
- * @returns {Promise<string>} - 一个解析为Base64字符串的Promise。
- */
-function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = error => reject(error);
+// 🛡️ Promise 未捕获错误处理器（统一处理）
+window.addEventListener('unhandledrejection', function(event) {
+    // 对于某些第三方库的 Promise 错误，我们也安全忽略
+    if (event.reason && event.reason.toString().includes('currentScript')) {
+        console.warn('🔧 捕获到未处理的 Promise 错误 (currentScript)，已安全忽略:', event.reason);
+        event.preventDefault();
+        return;
+    }
+
+    console.error('未处理的Promise拒绝:', {
+        reason: event.reason,
+        promise: event.promise,
+        timestamp: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        url: window.location.href
     });
+    
+    // 记录到全局错误日志
+    if (!window.errorLog) window.errorLog = [];
+    window.errorLog.push({
+        type: 'unhandledrejection',
+        reason: event.reason?.toString() || 'Unknown',
+        timestamp: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        url: window.location.href
+    });
+    
+    // 检查是否是API相关的错误，如果是则显示重试对话框
+    const errorMessage = event.reason?.message || event.reason?.toString() || '';
+    const isAPIError = errorMessage.includes('API请求失败') || 
+                      errorMessage.includes('API Error') || 
+                      errorMessage.includes('429') ||
+                      errorMessage.includes('500') ||
+                      errorMessage.includes('503') ||
+                      errorMessage.includes('502') ||
+                      errorMessage.includes('空回') ||
+                      errorMessage.includes('AI回复内容为空') ||
+                      errorMessage.includes('AI未返回有效内容');
+    
+    if (isAPIError && typeof showApiError === 'function') {
+        showApiError(event.reason || new Error(errorMessage));
+    }
+    
+    // 防止控制台显示未处理的错误（已记录）
+    event.preventDefault();
+});
+
+// 已将以下功能迁移到专门的utils文件：
+// - 主题管理 → uiManager.js
+// - 文件上传处理 → imageStorageAPI.js  
+// - 数据库管理 → dataMigrator.js
+// - 日志系统 → systemUtilities.js
+// - 颜色工具函数 → colorUtils.js
+// - UI交互工具函数 → uiUtils.js
+// - 格式化工具函数 → formatUtils.js
+
+// 工具函数现在通过全局对象访问：
+// - window.ColorUtils.* (颜色工具函数)
+// - window.UIUtils.* (UI交互工具函数) 
+// - window.FormatUtils.* (格式化工具函数)
+// - window.DBUtils.* (数据库工具函数)
+// 
+// 同时为向后兼容，所有函数也直接挂载在window对象上
+
+// 主题管理已迁移到 utils/uiManager.js
+
+// 长按屏蔽系统已迁移到 utils/uiManager.js
+
+
+// escapeHtml function moved to utils/formatUtils.js
+
+/**
+ * 解析语音消息格式，支持新的[V]格式和兼容旧的[语音]:格式
+ * @param {string} messageContent - 原始消息内容
+ * @returns {Object} - { content: string, isVoice: boolean }
+ */
+function parseVoiceMessage(messageContent) {
+    if (!messageContent) {
+        return { content: messageContent, isVoice: false };
+    }
+    
+    const NEW_VOICE_PREFIX = '[V]';
+    const OLD_VOICE_PREFIX = '[语音]:';
+    
+    // 检查新格式：[V]内容
+    if (messageContent.startsWith(NEW_VOICE_PREFIX)) {
+        const content = messageContent.substring(NEW_VOICE_PREFIX.length);
+        return { content: content, isVoice: true };
+    }
+    
+    // 检查旧格式：[语音]:内容
+    if (messageContent.startsWith(OLD_VOICE_PREFIX)) {
+        const content = messageContent.substring(OLD_VOICE_PREFIX.length).trim();
+        return { content: content, isVoice: true };
+    }
+    
+    // 普通文字消息
+    return { content: messageContent, isVoice: false };
 }
 
-// =================================================================
-// API Service - 所有API调用现在都直接在前端处理
-// =================================================================
-window.apiService = {
-    /**
-     * 调用一个通用的、与OpenAI兼容的聊天补全API。
-     * @param {string} apiUrl - API的基础URL。
-     * @param {string} apiKey - API密钥。
-     * @param {string} model - 要使用的模型。
-     * @param {Array<object>} messages - 消息对象数组。
-     * @param {object} options - 额外的选项，如temperature, response_format。
-     * @param {number} timeout - 请求超时时间（毫秒）。
-     * @returns {Promise<object>} - 来自API的JSON响应。
-     */
-    async callOpenAIAPI(apiUrl, apiKey, model, messages, options = {}, timeout = 60000) {
-        // 聊天补全的端点
-        const fullApiUrl = `${apiUrl}/chat/completions`;
-        
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-        const payload = {
-            model,
-            messages,
-            ...options
-        };
-
-        try {
-            console.log("正在调用API:", fullApiUrl, "负载:", payload);
-            const response = await fetch(fullApiUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiKey}`,
-                    // 伪装UA，有些API需要
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
-                },
-                body: JSON.stringify(payload),
-                signal: controller.signal
-            });
-
-            clearTimeout(timeoutId);
-
-            if (!response.ok) {
-                const errorBody = await response.text();
-                console.error('API 错误响应:', errorBody);
-                // 尝试解析更详细的错误信息
-                try {
-                    const errorJson = JSON.parse(errorBody);
-                    if (errorJson.error && errorJson.error.message) {
-                         throw new Error(`API请求失败: ${response.status} - ${errorJson.error.message}`);
-                    }
-                } catch(e) {
-                    // 如果不是JSON，则回退到文本
-                }
-                throw new Error(`API请求失败: ${response.status} - ${errorBody}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            clearTimeout(timeoutId);
-            if (error.name === 'AbortError') {
-                console.error('API 请求超时。');
-                throw new Error('API请求超时，请检查网络或在设置中增加超时时间。');
-            }
-            console.error('在 callOpenAIAPI 中捕获到 Fetch 错误:', error);
-            throw error;
-        }
-    },
-
-    /**
-     * 通过获取模型列表来测试与OpenAI兼容API的连接。
-     * @param {string} apiUrl - API的基础URL。
-     * @param {string} apiKey - API密钥。
-     * @returns {Promise<object>} - 来自API的JSON响应。
-     */
-    async testConnection(apiUrl, apiKey) {
-        // 列出模型的端点
-        const fullApiUrl = `${apiUrl}/models`;
-        
-        try {
-            console.log("正在测试连接:", fullApiUrl);
-            const response = await fetch(fullApiUrl, {
-                method: 'GET',
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
-                }
-            });
-
-            if (!response.ok) {
-                const errorBody = await response.text();
-                console.error('API 连接测试错误响应:', errorBody);
-                throw new Error(`连接测试失败: ${response.status} - ${errorBody}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('在 testConnection 中捕获到 Fetch 错误:', error);
-            throw error;
-        }
-    },
-
-
-
-    /**
-     * 【已修复】调用智谱GLM的ASR（语音识别）API
-     * @param {Blob} audioBlob - 录制的单声道WAV音频数据
-     * @returns {Promise<string>} - 返回识别出的文本
-     */
-    async callGlmAsrAPI(audioBlob) {
-        // 1. 从设置中获取GLM API Key
-        const glmApiKey = apiSettings.glmApiKey;
-        if (!glmApiKey) {
-            throw new Error('尚未配置智谱GLM API Key，无法进行语音识别。');
-        }
-
-        // 2. 生成认证用的JWT Token
-        const token = generateToken(glmApiKey);
-
-        // 3. 准备API请求
-        const url = 'https://open.bigmodel.cn/api/paas/v4/audio/transcriptions';
-        const formData = new FormData();
-        
-        // 4. 填充表单数据
-        formData.append('model', 'glm-asr');
-        formData.append('file', audioBlob, 'recording.wav');
-
-        // 5. 配置请求选项
-        const options = {
-            method: 'POST',
-            headers: {
-                // 【已修复】根据JWT标准，添加 "Bearer " 前缀
-                'Authorization': 'Bearer ' + token
-            },
-            body: formData
-        };
-
-        // 6. 发送请求并处理响应
-        try {
-            console.log("正在调用智谱ASR API...");
-            const response = await fetch(url, options);
-
-            const data = await response.json();
-            console.log("智谱ASR原始响应:", data); // 增加日志方便调试
-
-            // 如果请求失败
-            if (!response.ok) {
-                const errorMessage = data?.error?.message || response.statusText || '未知API错误';
-                throw new Error(`GLM ASR API 错误: ${errorMessage} (状态码: ${response.status})`);
-            }
-
-            // 【核心修正】: 根据你的截图，识别结果在 'text' 字段中
-            // 使用 typeof data.text !== 'undefined' 可以正确处理空字符串""的情况
-            if (data && typeof data.text !== 'undefined') {
-                return data.text;
-            } else {
-                 // 如果 text 字段不存在，提供更详细的错误信息
-                const errorDetail = data.message || JSON.stringify(data);
-                console.error("API未返回有效的'text'字段，完整响应:", data);
-                throw new Error(`API未返回有效的识别结果。响应: ${errorDetail}`);
-            }
-        } catch (error) {
-            console.error('调用GLM ASR API时出错:', error.message); 
-            // 将原始错误继续向上抛出，以便上层函数能捕获
-            throw error;
-        }
+/**
+ * 为语音消息设置UI，包括添加语音图标和点击事件
+ * @param {HTMLElement} msgDiv - 消息div元素
+ * @param {Object} message - 消息对象，包含content、isVoice等属性
+ * @param {Object} currentContact - 当前联系人对象
+ */
+function setupVoiceMessageUI(msgDiv, message, currentContact) {
+    const minimaxGroupId = localStorage.getItem('minimaxGroupId') || '';
+    const minimaxApiKey = localStorage.getItem('minimaxApiKey') || '';
+    
+    if (!message.isVoice || !currentContact.voiceId || !minimaxGroupId || !minimaxApiKey) {
+        return;
     }
-};
-
-
-// === Console日志捕获系统 ===
-let consoleLogs = [];
-const maxLogEntries = 1000; // 限制日志条目数量避免内存过大
-
-// 重写console方法来捕获日志
-function setupConsoleCapture() {
-    const originalConsole = {
-        log: console.log,
-        error: console.error,
-        warn: console.warn,
-        info: console.info,
-        debug: console.debug
-    };
-
-    function captureLog(level, args) {
-        const timestamp = new Date().toISOString();
-        const message = args.map(arg => {
-            if (typeof arg === 'object') {
-                try {
-                    return JSON.stringify(arg, null, 2);
-                } catch (e) {
-                    return String(arg);
-                }
-            }
-            return String(arg);
-        }).join(' ');
+    
+    // 兼容自定义气泡和默认气泡
+    const bubble = msgDiv.querySelector('.message-bubble') || 
+                  msgDiv.querySelector('.custom-bubble-container') || 
+                  msgDiv.querySelector('.chat-bubble');
+    if (!bubble) {
+        return;
+    }
+    
+    const messageUniqueId = `${currentContact.id}-${message.time}`;
+    
+    // 给气泡添加语音消息标识
+    bubble.classList.add('voice-message');
+    bubble.dataset.voiceMessageId = `voice-${messageUniqueId}`;
+    
+    // 在消息内容前添加语音符号
+    const textContentDiv = bubble.querySelector('.message-content') || bubble;
+    if (textContentDiv && !textContentDiv.querySelector('.voice-icon')) {
+        const voiceIcon = document.createElement('span');
+        voiceIcon.className = 'voice-icon';
+        voiceIcon.innerHTML = createVoiceIcon();
         
-        consoleLogs.push({
-            timestamp,
-            level,
-            message
+        // 确定插入点并插入语音符号
+        let insertionPoint = textContentDiv.firstChild;
+        if (textContentDiv === bubble) {
+            const firstTextNode = Array.from(textContentDiv.childNodes).find(node => 
+                node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== ''
+            );
+            if (firstTextNode) {
+                insertionPoint = firstTextNode;
+            }
+        }
+        textContentDiv.insertBefore(voiceIcon, insertionPoint);
+        
+        // 添加点击事件监听器
+        bubble.addEventListener('click', () => {
+            playVoiceMessage(bubble, message.content, message.senderId || currentContact.id);
         });
-        
-        // 限制日志数量
-        if (consoleLogs.length > maxLogEntries) {
-            consoleLogs = consoleLogs.slice(-maxLogEntries);
-        }
-    }
-
-    console.log = function(...args) {
-        captureLog('log', args);
-        originalConsole.log.apply(console, args);
-    };
-
-    console.error = function(...args) {
-        captureLog('error', args);
-        originalConsole.error.apply(console, args);
-    };
-
-    console.warn = function(...args) {
-        captureLog('warn', args);
-        originalConsole.warn.apply(console, args);
-    };
-
-    console.info = function(...args) {
-        captureLog('info', args);
-        originalConsole.info.apply(console, args);
-    };
-
-    console.debug = function(...args) {
-        captureLog('debug', args);
-        originalConsole.debug.apply(console, args);
-    };
-}
-
-// 传统下载方式的辅助函数
-function fallbackDownload(content, filename) {
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
-
-// 导出日志功能
-function exportConsoleLogs() {
-    try {
-        if (consoleLogs.length === 0) {
-            showToast('没有日志可导出');
-            return;
-        }
-
-        const logContent = consoleLogs.map(log => 
-            `[${log.timestamp}] [${log.level.toUpperCase()}] ${log.message}`
-        ).join('\n');
-
-        const filename = `console-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
-
-        // 【核心改动】检查是否存在原生安卓接口
-        if (window.Android && typeof window.Android.saveFile === 'function') {
-            window.Android.saveFile(logContent, filename);
-        } else {
-            // 如果不是在安卓App中，或者接口不存在，则执行原来的Web下载逻辑
-            fallbackDownload(logContent, filename);
-            showToast(`已导出 ${consoleLogs.length} 条日志`);
-        }
-        document.getElementById('settingsMenu').style.display = 'none';
-    } catch (error) {
-        console.error('导出日志失败:', error);
-        showToast('导出日志失败: ' + error.message);
     }
 }
-
-// 立即启用console捕获
-setupConsoleCapture();
-
-// === 调试日志页面功能 ===
-function showDebugLogPage() {
-    showPage('debugLogPage');
-    updateDebugLogDisplay();
-}
-
-function updateDebugLogDisplay() {
-    const logContent = document.getElementById('debugLogContent');
-    const logCount = document.getElementById('logCount');
-    
-    if (consoleLogs.length === 0) {
-        logContent.innerHTML = '<div class="debug-log-empty">暂无日志记录</div>';
-        logCount.textContent = '0';
-        return;
-    }
-    
-    logCount.textContent = consoleLogs.length.toString();
-    
-    const logsHtml = consoleLogs.map(log => {
-        const time = new Date(log.timestamp).toLocaleTimeString();
-        const levelClass = `debug-log-${log.level}`;
-        return `
-            <div class="debug-log-item ${levelClass}">
-                <div class="debug-log-header">
-                    <span class="debug-log-time">${time}</span>
-                    <span class="debug-log-level">${log.level.toUpperCase()}</span>
-                </div>
-                <div class="debug-log-message">${escapeHtml(log.message)}</div>
-            </div>
-        `;
-    }).join('');
-    
-    logContent.innerHTML = logsHtml;
-    
-    // 滚动到底部显示最新日志
-    logContent.scrollTop = logContent.scrollHeight;
-}
-
-function clearDebugLogs() {
-    consoleLogs.length = 0;
-    updateDebugLogDisplay();
-    showToast('已清空调试日志');
-}
-
-function copyDebugLogs() {
-    if (consoleLogs.length === 0) {
-        showToast('没有日志可复制');
-        return;
-    }
-    
-    const logText = consoleLogs.map(log => 
-        `[${log.timestamp}] [${log.level.toUpperCase()}] ${log.message}`
-    ).join('\n');
-    
-    // 尝试使用现代的Clipboard API
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(logText).then(() => {
-            showToast(`已复制 ${consoleLogs.length} 条日志到剪贴板`);
-        }).catch(err => {
-            console.error('复制失败:', err);
-            fallbackCopyTextToClipboard(logText);
-        });
-    } else {
-        fallbackCopyTextToClipboard(logText);
-    }
-}
-
-function fallbackCopyTextToClipboard(text) {
-    const textArea = document.createElement("textarea");
-    textArea.value = text;
-    textArea.style.top = "0";
-    textArea.style.left = "0";
-    textArea.style.position = "fixed";
-    
-    document.body.appendChild(textArea);
-    textArea.focus();
-    textArea.select();
-    
-    try {
-        const successful = document.execCommand('copy');
-        if (successful) {
-            showToast(`已复制 ${consoleLogs.length} 条日志到剪贴板`);
-        } else {
-            showToast('复制失败，请手动选择文本');
-        }
-    } catch (err) {
-        console.error('Fallback: 复制失败', err);
-        showToast('复制失败: ' + err.message);
-    }
-    
-    document.body.removeChild(textArea);
-}
-
-function escapeHtml(text) {
-    const map = {
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, function(m) { return map[m]; });
-}
-
-// --- 通用文件上传与处理 ---
-// 这个函数现在更通用：本地文件转为Base64后设置到输入框
-async function handleFileAndConvertToBase64(inputId, targetUrlInputId, statusElementId) {
-    const fileInput = document.getElementById(inputId);
-    const file = fileInput.files[0];
-    const statusElement = document.getElementById(statusElementId);
-    const targetUrlInput = document.getElementById(targetUrlInputId);
-
-    if (!file) {
-        showToast('请先选择一个文件');
-        return;
-    }
-
-    if (!file.type.startsWith('image/')) {
-        showToast('请上传图片文件');
-        fileInput.value = '';
-        return;
-    }
-
-    if (statusElement) statusElement.textContent = '加载中...';
-    
-    // 使用 FileReader 将图片转为 Base64
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = () => {
-        targetUrlInput.value = reader.result;
-        if (statusElement) statusElement.textContent = '加载成功！';
-        showToast('图片已加载');
-    };
-    reader.onerror = (error) => {
-        console.error('文件读取失败:', error);
-        if (statusElement) statusElement.textContent = '读取失败';
-        showToast(`读取失败: ${error.message}`);
-    };
-}
-
-// 【新增】专门用于处理表情上传的函数
-function handleEmojiFileUpload(event) {
-    const file = event.target.files[0];
-    if (!file) {
-        selectedEmojiFile = null;
-        document.getElementById('emojiUrl').value = ''; // 清空URL输入框
-        document.getElementById('emojiUploadStatus').textContent = '';
-        return;
-    }
-    if (!file.type.startsWith('image/')) {
-        showToast('请上传图片文件');
-        event.target.value = '';
-        return;
-    }
-    // 将文件对象存到临时变量
-    selectedEmojiFile = file;
-    // 清空URL输入框，因为我们优先使用文件
-    document.getElementById('emojiUrl').value = '';
-    // 给用户反馈
-    document.getElementById('emojiUploadStatus').textContent = `已选择: ${file.name}`;
-    showToast('图片已选择');
-}
-
-// 【重要】重命名旧的函数，因为其他地方（如头像上传）还在用它
-const handleFileUpload = handleFileAndConvertToBase64;
 
 // --- 全局状态 ---
 let contacts = [];
+// 确保暴露到全局对象
+window.contacts = contacts;
 let currentContact = null;
+window.currentContact = currentContact;
 let editingContact = null;
-const CONTEXT_MESSAGE_MAX = 1000;
-let showDetailedStats = false; // 是否展开显示
-// let customBubbleStyle = null; // 删掉或者注释掉这一行
-let bubbleStyles = {}; // 新增：用于存储所有自定义气泡样式，格式为 { 'styleId': { name: '样式名', html: '...', css: '...' } }
-let selectedEmojiFile = null; // 【新增】用于临时存储待上传的表情文件
-let customModelsByUrl = {};
-let todoItems = []; // 新增：存储待办事项列表
+window.editingContact = editingContact;
 
-// 【修改点 1】: 更新 apiSettings 结构以适应 Minimax
+// 🔥 数据库初始化已统一到 UnifiedDBManager，旧的竞态控制变量已移除
+
+// API配置设置（不包含minimax语音配置）
 let apiSettings = {
     url: '',
     key: '',
     model: '',
     secondaryModel: 'sync_with_primary',
     contextMessageCount: 10,
-    timeout: 60,
-    showUsageStats: true, // 默认开启统计
-    // 计费标准（元/百万Token）
-    priceHit: 1.0,
-    priceMiss: 12.0,
-    priceOut: 24.0,
-    // 移除了 elevenLabsApiKey，换成 Minimax 的凭证
-    minimaxGroupId: '',
-    minimaxApiKey: ''
+    timeout: 60
+    // minimax配置已移至localStorage独立管理
 };
 
+// --- 用户配置获取函数 ---
+async function getUserProfile() {
+    // 返回全局的 userProfile 对象
+    return userProfile || {
+        name: '我的昵称',
+        avatar: null,
+        personality: ''
+    };
+}
+// 确保暴露到全局对象
+window.apiSettings = apiSettings;
 let emojis = [];
 let backgrounds = {};
 let userProfile = {
     name: '我的昵称',
     avatar: '',
-    personality: '',
-    bubbleStyleId: '', // 【新增】为用户资料添加气泡样式ID
-    // 新增钱包属性
-    wallet: {
-        balance: 0,       // 余额，默认为0
-        transactions: []  // 交易记录，默认为空数组
-    }
+    personality: '' 
 };
+
+// 将 userProfile 绑定到全局作用域
+window.userProfile = userProfile;
 let moments = [];
 let weiboPosts = [];
 
+const RELATION_PRESETS = {
+    'CP': 'CP（两者互为情侣）',
+    'CB': 'CB（友情、亲情等非恋爱的亲密关系）', 
+    '好友': '好友',
+    '宿敌': '宿敌（两者互为能持续永恒的较量，长期的敌人，天生的对手，命中注定的竞争者）'
+};
 
 let hashtagCache = {};
 
-// 帖子模板定义
-const postTemplate = `
-<div class="post" id="\${postId}">
-    <div class="post-header">
-        <div class="avatar">
-            \${postAuthorAvatar}
-        </div>
-        <div class="post-info">
-            <div class="user-name">
-                \${postAuthorNickname}
-                <span class="vip-badge">\${badgeText}</span>
-            </div>
-            <div class="post-time">\${postTime}</div>
-            <div class="post-source">来自 \${sourceTopic} 研究社</div>
-        </div>
-        <div class="post-menu" onclick="toggleWeiboMenu(event, '\${storedPostId}', \${postIndex})">
-            <span class="post-menu-icon">⋯</span>
-            <div class="post-menu-dropdown" id="weibo-menu-\${storedPostId}-\${postIndex}">
-                <div class="menu-item" onclick="deleteWeiboPost('\${storedPostId}', \${postIndex})">删除</div>
-            </div>
-        </div>
-    </div>
-    <div class="post-content">
-        <a href="#" class="hashtag">#\${hashtag}#</a>
-        \${postContent}
-        \${mentionHtml}
-    </div>
-    <div class="post-image-desc">
-        \${imageDescription}
-    </div>
-    <div class="post-actions">
-        <a href="#" class="action-btn-weibo">
-            <span class="action-icon">🔄</span>
-            <span>\${randomRepostCount}</span>
-        </a>
-        <a href="#" class="action-btn-weibo" onclick="showReplyBox('\${postId}')">
-            <span class="action-icon">💬</span>
-            <span>\${commentCount}</span>
-        </a>
-        <a href="#" class="action-btn-weibo">
-            <span class="action-icon">👍</span>
-            <span>\${randomLikeCount}</span>
-        </a>
-    </div>
-    <div class="comments-section">
-        \${commentsHtml}
-    </div>
-</div>
-`;
-
 let audio = null;
-let db = null; // IndexedDB 实例 
+// IndexedDB 实例统一使用 window.db，不再使用局部变量
+
+// 全局错误处理已统一到文件开头的 unhandledrejection 监听器中
+
+// === 图片处理辅助函数 ===
+
+/**
+ * 获取头像HTML（支持新的文件存储格式和旧的base64格式）
+ * @param {Object} entity - 实体对象（联系人或用户）
+ * @param {string} entityType - 实体类型 ('contact' 或 'user')
+ * @param {string} className - CSS类名（可选）
+ * @returns {Promise<string>} 返回HTML字符串
+ */
+async function getAvatarHTML(entity, entityType = 'contact', className = '') {
+    if (!entity) return '';
+    
+    try {
+        // 如果有新的文件引用，使用ImageDisplayHelper
+        if (entity.avatarFileId && window.ImageDisplayHelper) {
+            return await window.ImageDisplayHelper.createAvatarHTML(entity, entityType, className);
+        }
+        
+        // 回退到旧的base64格式
+        const classAttr = className ? ` class="${className}"` : '';
+        if (entity.avatar && entity.avatar.startsWith('data:')) {
+            return `<img src="${entity.avatar}"${classAttr}>`;
+        } else {
+            // 使用首字符作为默认头像
+            const firstChar = entity.name ? entity.name[0] : (entityType === 'user' ? '我' : '?');
+            return `<span${classAttr}>${firstChar}</span>`;
+        }
+    } catch (error) {
+        console.warn(`获取${entityType}头像HTML失败:`, error);
+        // 安全回退
+        const classAttr = className ? ` class="${className}"` : '';
+        const firstChar = entity.name ? entity.name[0] : (entityType === 'user' ? '我' : '?');
+        return entity.avatar ? `<img src="${entity.avatar}"${classAttr}>` : `<span${classAttr}>${firstChar}</span>`;
+    }
+}
+
+/**
+ * 同步获取头像HTML（用于不能使用async的地方）
+ * 注意：这个函数不支持新的文件存储格式，只用于紧急情况下的回退
+ */
+function getAvatarHTMLSync(entity, entityType = 'contact', className = '') {
+    if (!entity) return '';
+    
+    const classAttr = className ? ` class="${className}"` : '';
+    if (entity.avatar && entity.avatar.startsWith('data:')) {
+        return `<img src="${entity.avatar}"${classAttr}>`;
+    } else {
+        const firstChar = entity.name ? entity.name[0] : (entityType === 'user' ? '我' : '?');
+        return `<span${classAttr}>${firstChar}</span>`;
+    }
+}
+
+/**
+ * 获取背景图片URL
+ * @param {Object} background - 背景对象
+ * @returns {Promise<string>} 返回图片URL
+ */
+async function getBackgroundImageURL(background) {
+    if (!background) return '';
+    
+    try {
+        // 如果有新的文件引用，使用ImageDisplayHelper
+        if (background.fileId && window.ImageDisplayHelper) {
+            return await window.ImageDisplayHelper.getBackgroundURL(background);
+        }
+        
+        // 回退到旧格式
+        return background.data || background.url || '';
+    } catch (error) {
+        console.warn('获取背景图片失败:', error);
+        return background.data || background.url || '';
+    }
+}
+
+/**
+ * 获取表情包URL
+ * @param {Object} emoji - 表情包对象
+ * @returns {Promise<string>} 返回图片URL
+ */
+async function getEmojiImageURL(emoji) {
+    if (!emoji) return '';
+    
+    try {
+        // 如果有新的文件引用，使用ImageDisplayHelper
+        if (emoji.fileId && window.ImageDisplayHelper) {
+            return await window.ImageDisplayHelper.getEmojiURL(emoji);
+        }
+        
+        // 回退到旧格式
+        return emoji.data || emoji.url || '';
+    } catch (error) {
+        console.warn('获取表情包失败:', error);
+        return emoji.data || emoji.url || '';
+    }
+} 
 let playlist = [];
 let currentSongIndex = -1;
 let isPlaying = false;
@@ -648,9 +341,23 @@ let isEmojiGridRendered = false;
 let isMomentsRendered = false;
 let isMusicPlayerInitialized = false;
 let isIndexedDBReady = false; 
+// ⚠️ 注意：数据库操作统一使用 window.db 和 window.isIndexedDBReady，不要使用局部变量 
 const MESSAGES_PER_PAGE = 15;
 let currentlyDisplayedMessageCount = 0;
 let isLoadingMoreMessages = false;
+
+// 论坛帖子分页相关变量
+const POSTS_PER_PAGE = 10;
+let currentlyDisplayedPostCount = 0;
+let isLoadingMorePosts = false;
+
+// 虚拟滚动相关变量
+const VIRTUAL_WINDOW_SIZE = 8; // 虚拟滚动窗口大小
+const ESTIMATED_POST_HEIGHT = 300; // 估算的帖子高度（像素）
+let allPosts = []; // 扁平化的所有帖子列表
+let virtualScrollTop = 0;
+let currentStartIndex = 0;
+let currentEndIndex = 0;
 
 // 多选模式状态
 let isMultiSelectMode = false;
@@ -661,85 +368,232 @@ let voiceAudio = new Audio(); // 用于播放语音消息的全局Audio对象
 let currentPlayingElement = null; // 跟踪当前播放的语音元素
 
 
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').then(registration => {
+      console.log('Service Worker 注册成功: ', registration);
+    }).catch(registrationError => {
+      console.log('Service Worker 注册失败: ', registrationError);
+    });
+  });
+
+  // 🔥 监听来自 Service Worker 的缓存清理消息
+  navigator.serviceWorker.addEventListener('message', event => {
+    if (event.data && event.data.type === 'CACHE_BUSTED') {
+      console.log('🔥 收到缓存清理通知:', event.data.message);
+      console.log('🔄 准备重新加载页面以应用数据库重构...');
+      
+      // 显示用户友好的提示
+      if (typeof showToast === 'function') {
+        showToast('检测到系统更新，正在重新加载...', 'info');
+      }
+      
+      // 延迟 1 秒后重新加载，给用户看到提示的时间
+      setTimeout(() => {
+        console.log('🔄 强制重新加载页面');
+        window.location.reload(true); // 强制从服务器重新加载
+      }, 1000);
+    }
+  });
+}
+
+// --- 初始化进度显示函数 ---
+
+/**
+ * 显示初始化进度提示
+ * @param {string} message - 显示消息
+ * @param {string} type - 消息类型 (system/api/worker/url/import/database/error)
+ */
+function showInitializationProgress(message, type = 'info') {
+    // 查找或创建进度容器
+    let progressContainer = document.getElementById('init-progress-container');
+    if (!progressContainer) {
+        progressContainer = document.createElement('div');
+        progressContainer.id = 'init-progress-container';
+        progressContainer.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        `;
+        
+        const progressBox = document.createElement('div');
+        progressBox.id = 'init-progress-box';
+        progressBox.style.cssText = `
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            max-width: 400px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        `;
+        
+        progressBox.innerHTML = `
+            <div style="display: flex; align-items: center; justify-content: center; margin-bottom: 20px;">
+                <div class="spinner" style="
+                    width: 24px; height: 24px; margin-right: 12px;
+                    border: 3px solid #f3f3f3; border-top: 3px solid #007bff;
+                    border-radius: 50%; animation: spin 1s linear infinite;
+                "></div>
+                <h3 style="margin: 0; color: #333;">Whale-LLT 正在启动</h3>
+            </div>
+            <p id="init-progress-message" style="margin: 0; color: #666; line-height: 1.5;"></p>
+            <div id="init-progress-steps" style="margin-top: 15px; font-size: 12px; color: #999; text-align: left;"></div>
+        `;
+        
+        progressContainer.appendChild(progressBox);
+        document.body.appendChild(progressContainer);
+        
+        // 添加CSS动画
+        if (!document.getElementById('init-progress-styles')) {
+            const style = document.createElement('style');
+            style.id = 'init-progress-styles';
+            style.textContent = `
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    }
+    
+    const messageEl = document.getElementById('init-progress-message');
+    const stepsEl = document.getElementById('init-progress-steps');
+    
+    if (messageEl) {
+        messageEl.textContent = message;
+        messageEl.style.color = type === 'error' ? '#dc3545' : '#666';
+    }
+    
+    // 记录步骤
+    if (type !== 'error' && stepsEl) {
+        const timestamp = new Date().toLocaleTimeString();
+        const stepEl = document.createElement('div');
+        stepEl.textContent = `${timestamp} - ${message}`;
+        stepEl.style.cssText = 'margin: 2px 0; opacity: 0.7;';
+        stepsEl.appendChild(stepEl);
+        
+        // 只保留最近5个步骤
+        while (stepsEl.children.length > 5) {
+            stepsEl.removeChild(stepsEl.firstChild);
+        }
+    }
+    
+    console.log(`[初始化进度] ${message}`);
+}
+
+/**
+ * 隐藏初始化进度提示
+ */
+function hideInitializationProgress() {
+    const progressContainer = document.getElementById('init-progress-container');
+    if (progressContainer) {
+        progressContainer.style.opacity = '0';
+        progressContainer.style.transition = 'opacity 0.3s ease-out';
+        
+        setTimeout(() => {
+            if (progressContainer.parentNode) {
+                progressContainer.parentNode.removeChild(progressContainer);
+            }
+        }, 300);
+    }
+    
+    // 清理样式
+    const styles = document.getElementById('init-progress-styles');
+    if (styles && styles.parentNode) {
+        styles.parentNode.removeChild(styles);
+    }
+}
+
 // --- 初始化 ---
 async function init() {
-    // ▼▼▼ 新增：更新初始进度 ▼▼▼
-    updateLoadingProgress(5, '正在初始化...');
-    // 模拟一个短暂的启动延迟，让用户能看到"正在初始化"
-    await new Promise(resolve => setTimeout(resolve, 100)); 
-
-    // 步骤1: 检查用户是否已经同意过免责声明
-    if (localStorage.getItem('disclaimerAccepted') !== 'true') {
-        // (免责声明的逻辑不变)
-        const blocker = document.getElementById('appBlockerOverlay');
-        const modal = document.getElementById('disclaimerModal');
-        blocker.style.display = 'block';
-        modal.style.display = 'block';
-        const checkbox = document.getElementById('disclaimerCheckbox');
-        const agreeBtn = document.getElementById('disclaimerAgreeBtn');
-        const disagreeBtn = document.getElementById('disclaimerDisagreeBtn');
-        checkbox.addEventListener('change', () => {
-            agreeBtn.disabled = !checkbox.checked;
-        });
-        disagreeBtn.addEventListener('click', () => {
-            alert('感谢使用。您已选择不同意条款，应用将无法使用。');
-            window.close(); 
-        });
-        agreeBtn.addEventListener('click', () => {
-            localStorage.setItem('disclaimerAccepted', 'true');
-            blocker.style.display = 'none';
-            modal.style.display = 'none';
-        });
-        // 注意：我们不在此处 return，允许加载在后台继续
-    }
-
-    // ▼▼▼ 新增：更新进度 ▼▼▼
-    // 无论是否显示免责声明，都开始加载
-    updateLoadingProgress(10, '正在连接数据库...');
-
     try {
-        await openDB(); // 确保IndexedDB先打开
+        console.log('[DEBUG] 开始应用初始化...');
         
-        // ▼▼▼ 新增：更新进度 ▼▼▼
-        updateLoadingProgress(30, '正在加载联系人...');
+        // [DEBUG-MOMENTS-ROLES-START] 使用统一的数据库初始化，修复完成后可选择保留
+        await executeWithRetry(async () => {
+            console.log('[DEBUG] 调用统一的数据库初始化函数');
+            
+            // 使用统一的数据库初始化函数，防止竞态条件
+            const db = await initializeDatabaseOnce();
+            
+            // 二次确认初始化结果
+            if (!db || !window.isIndexedDBReady) {
+                throw new Error('统一数据库初始化后连接仍未建立');
+            }
+            
+            // 验证关键表是否存在
+            const requiredStores = ['contacts', 'moments', 'apiSettings'];
+            const missingStores = requiredStores.filter(store => !window.db.objectStoreNames.contains(store));
+            if (missingStores.length > 0) {
+                throw new Error(`数据库初始化不完整，缺少存储: ${missingStores.join(', ')}`);
+            }
+            
+            console.log('[DEBUG] 统一数据库初始化成功');
+            console.log('[DEBUG] 数据库版本:', window.db.version);
+            console.log('[DEBUG] 可用存储:', Array.from(window.db.objectStoreNames));
+            
+        }, '应用初始化 - 统一数据库连接');
+        // [DEBUG-MOMENTS-ROLES-END]
         
-        // 将并行加载拆分为串行，以便更新进度条
-        const loadedContacts = await loadContactsForList();
+        // 从IndexedDB加载数据
+        await loadDataFromDB();
+        console.log('应用数据加载完成');
         
-        // ▼▼▼ 新增：更新进度 ▼▼▼
-        updateLoadingProgress(50, '正在加载应用数据...');
-        
-        await loadInitialAppState(); // 这个函数不再加载联系人
-        
-        // ▼▼▼ 新增：更新进度 ▼▼▼
-        updateLoadingProgress(75, '正在整理数据...');
-        
-        contacts = loadedContacts;
-
-        // 【【【 核心修改：在此处调用新函数 】】】
-        // 在加载完数据库和联系人之后，立即处理[待处理]的队列
-        await processPendingTodoMessages();
-        // 【【【 修改结束 】】】
-
-    } catch (error) {
-        console.error("数据库初始化失败，应用无法继续加载数据:", error);
-        const contactList = document.getElementById('contactList');
-        if (contactList) {
-            contactList.innerHTML = `<div class="error-message"><h3>数据加载失败</h3><p>无法连接到本地数据库。请尝试关闭本站的其他标签页，然后<strong>刷新页面</strong>。</p><p><small>错误详情: ${error.message}</small></p></div>`;
+        // 初始化图片关键词生成器
+        if (window.imageKeywordGenerator && window.apiService) {
+            window.imageKeywordGenerator.init(apiSettings, window.apiService);
+            console.log('图片关键词生成器初始化完成');
         }
-        // ▼▼▼ 新增：加载失败时也要隐藏加载动画 ▼▼▼
-        hideLoadingOverlay();
-        return; 
+        
+        // 七夕节特殊处理 - 检查是否为8月29日且第一次打开
+        await window.SystemUtils.checkSpecialEvents();
+        
+    } catch (error) {
+        console.error('应用初始化失败:', error);
+        
+        // 分析错误类型并提供针对性解决方案
+        let errorType = 'unknown';
+        if (error.message.includes('数据库') || error.message.includes('IndexedDB') || error.message.includes('objectStoreNames')) {
+            errorType = 'database';
+        } else if (error.message.includes('网络') || error.message.includes('fetch')) {
+            errorType = 'network';
+        }
+        
+        // 记录详细错误信息用于调试
+        window.lastInitError = {
+            timestamp: new Date().toISOString(),
+            error: error.message,
+            stack: error.stack,
+            userAgent: navigator.userAgent,
+            url: window.location.href,
+            type: errorType,
+            dbState: {
+                hasWindow: !!window.db,
+                isReady: !!window.isIndexedDBReady,
+                dbVersion: window.db?.version
+            }
+        };
+        
+        showDatabaseErrorDialog(error, false);
+        throw error;
     }
-    
-    // ▼▼▼ 新增：更新进度 ▼▼▼
-    updateLoadingProgress(85, '正在渲染界面...');
-    
-    // 后续的渲染和事件绑定逻辑保持不变
-    renderContactList();
-    updateUserProfileUI();
+
+    await renderContactList();
+    // 立即更新一次时间显示，确保首次进入页面显示正确的时间
+    updateContactListTimes();
+    await updateUserProfileUI();
     updateContextIndicator();
     
+    // 绑定基础事件
     const chatInput = document.getElementById('chatInput');
     chatInput.addEventListener('input', function() {
         this.style.height = 'auto';
@@ -750,16 +604,18 @@ async function init() {
         const hint = document.getElementById('featureHint');
         if (hint) {
             hint.style.display = 'block';
-            setTimeout(() => { hint.style.display = 'none'; }, 5000);
+            setTimeout(() => {
+                hint.style.display = 'none';
+            }, 5000);
         }
     }, 1000);
 
-    // (语音播放器的事件绑定不变)
+    // 为全局voiceAudio对象绑定事件
     voiceAudio.onended = () => {
         if (currentPlayingElement) {
             currentPlayingElement.classList.remove('playing');
-            const playButton = currentPlayingElement.querySelector('.play-button');
-            if (playButton) playButton.textContent = '▶';
+            const voiceIcon = currentPlayingElement.querySelector('.voice-icon');
+            if (voiceIcon) voiceIcon.innerHTML = createVoiceIcon();
             currentPlayingElement = null;
         }
     };
@@ -767,15 +623,14 @@ async function init() {
         showToast('音频文件加载失败');
         if (currentPlayingElement) {
              currentPlayingElement.classList.remove('playing', 'loading');
-             const playButton = currentPlayingElement.querySelector('.play-button');
-             if (playButton) playButton.textContent = '▶';
+             const voiceIcon = currentPlayingElement.querySelector('.voice-icon');
+             if (voiceIcon) voiceIcon.innerHTML = createVoiceIcon();
              currentPlayingElement = null;
         }
     };
 
-    // ▼▼▼ 新增：更新进度 ▼▼▼
-    updateLoadingProgress(90, '正在检查更新...');
 
+    // Check for update announcements
     const unreadAnnouncements = await announcementManager.getUnread();
     if (unreadAnnouncements.length > 0) {
         const modalBody = document.getElementById('updateModalBody');
@@ -788,17 +643,23 @@ async function init() {
         modalBody.innerHTML = marked.parse(combinedContent);
         showModal('updateModal');
 
+        // Logic to show button when scrolled to bottom
         modalBody.onscroll = () => {
+            // Check if the user has scrolled to the bottom
+            // Adding a 5px tolerance
             if (modalBody.scrollHeight - modalBody.scrollTop - modalBody.clientHeight < 5) {
                 modalFooter.classList.add('visible');
             }
         };
 
+        // Also check if the content is not long enough to scroll
+        // Use a timeout to allow the DOM to render first
         setTimeout(() => {
             if (modalBody.scrollHeight <= modalBody.clientHeight) {
                 modalFooter.classList.add('visible');
             }
         }, 100);
+
 
         document.getElementById('updateModalCloseBtn').onclick = () => {
             closeModal('updateModal');
@@ -806,1935 +667,405 @@ async function init() {
             announcementManager.markAsSeen(idsToMark);
         };
     }
-
-    // ▼▼▼ 新增：处理主动消息 ▼▼▼
-    // 1. 检查离线期间是否触发了消息，有则写入数据库
-    await processProactiveMessagesResult();
-    
-    // 2. 启动看门狗计时器
-    startProactiveTimer();
-    // ▲▲▲ 新增结束 ▲▲▲
-
-    // ▼▼▼ 新增：所有操作完成，隐藏加载屏幕 ▼▼▼
-    updateLoadingProgress(100, '加载完成！');
-    // 延迟一小会（比如300ms）再隐藏，让用户能看到"加载完成"
-    setTimeout(hideLoadingOverlay, 300);
 }
 
 
 
 // --- IndexedDB 核心函数 ---
-function openDB() {
-    return new Promise((resolve, reject) => {
-        // 【重要】升级版本号以触发 onupgradeneeded（当前含结构化记忆底座 v14）
-        const request = indexedDB.open('WhaleLLTDB', 14); // 结构化记忆底座 memoryEpisodes / memoryFacts
 
-        // 【新增】处理数据库被阻塞的情况
-        request.onblocked = event => {
-            console.warn('IndexedDB 升级被阻塞。请关闭此网站的其他标签页后再试。');
-            showToast('数据库更新被阻塞，请关闭其他页面后刷新');
-            // 也可以选择 reject，让上层知道发生了问题
-            reject(new Error('数据库更新被阻塞 (onblocked)'));
-        };
-
-        request.onupgradeneeded = event => {
-            const db = event.target.result;
-            // 音乐播放器相关的ObjectStore
-            if (!db.objectStoreNames.contains('songs')) {
-                db.createObjectStore('songs', { keyPath: 'id', autoIncrement: true });
-            }
-            // 聊天助手相关的ObjectStore
-            if (!db.objectStoreNames.contains('contacts')) {
-                db.createObjectStore('contacts', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('apiSettings')) {
-                db.createObjectStore('apiSettings', { keyPath: 'id' });
-            }
-            // emojis 表现在只存储元数据
-            if (!db.objectStoreNames.contains('emojis')) {
-                db.createObjectStore('emojis', { keyPath: 'id' });
-            }
-            // 【新增】创建一个新的表，专门用于存储表情包的二进制图片数据(Blob)
-            if (!db.objectStoreNames.contains('emojiBlobs')) {
-                db.createObjectStore('emojiBlobs', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('backgrounds')) {
-                db.createObjectStore('backgrounds', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('userProfile')) {
-                db.createObjectStore('userProfile', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('customStyles')) {
-                // 这个可以保留，也可以删掉，新的逻辑不再使用它
-                db.createObjectStore('customStyles', { keyPath: 'id' });
-            }
-            // 【新增】创建新的气泡样式库表
-            if (!db.objectStoreNames.contains('bubbleStyles')) {
-                db.createObjectStore('bubbleStyles', { keyPath: 'id' });
-            }
-            // 【新增】创建待办事项表
-            if (!db.objectStoreNames.contains('todoItems')) {
-                db.createObjectStore('todoItems', { keyPath: 'id', autoIncrement: true });
-            }
-
-            if (!db.objectStoreNames.contains('bubbleStickers')) {
-                db.createObjectStore('bubbleStickers', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('moments')) {
-                db.createObjectStore('moments', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('weiboPosts')) {
-                db.createObjectStore('weiboPosts', { keyPath: 'id', autoIncrement: true });
-            }
-            if (!db.objectStoreNames.contains('hashtagCache')) {
-                db.createObjectStore('hashtagCache', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('customModels')) {
-                db.createObjectStore('customModels', { keyPath: 'id' });
-            }
-            // 【结构化记忆底座】旁路存储 episodes / facts（不影响旧 Markdown 记忆表）
-            if (!db.objectStoreNames.contains('memoryEpisodes')) {
-                const memoryEpisodesStore = db.createObjectStore('memoryEpisodes', { keyPath: 'id' });
-                memoryEpisodesStore.createIndex('contactId', 'contactId', { unique: false });
-                memoryEpisodesStore.createIndex('createdAt', 'createdAt', { unique: false });
-                memoryEpisodesStore.createIndex('type', 'type', { unique: false });
-            }
-            if (!db.objectStoreNames.contains('memoryFacts')) {
-                const memoryFactsStore = db.createObjectStore('memoryFacts', { keyPath: 'id' });
-                memoryFactsStore.createIndex('contactId', 'contactId', { unique: false });
-                memoryFactsStore.createIndex('subject', 'subject', { unique: false });
-                memoryFactsStore.createIndex('predicate', 'predicate', { unique: false });
-                memoryFactsStore.createIndex('status', 'status', { unique: false });
-                memoryFactsStore.createIndex('createdAt', 'createdAt', { unique: false });
-                memoryFactsStore.createIndex('updatedAt', 'updatedAt', { unique: false });
-            }
-            // 【修正】删除重复的 customStyles 和 bubbleStickers 创建
-        };
-
-        request.onsuccess = event => {
-            db = event.target.result;
-            isIndexedDBReady = true; // 标记IndexedDB已准备就绪
-            resolve(db);
-        };
-
-        request.onerror = event => {
-            // 【修改】使用 event.target.error 可以提供更详细的错误信息
-            console.error('IndexedDB 打开失败:', event.target.error); 
-            showToast('数据存储初始化失败: ' + event.target.error.message); // 【可选增强】给用户更明确的提示
-            reject(event.target.error); // 【修改】将详细的错误对象 reject 出去
-        };
-    });
-}
-
-// 【新增】只更新单个联系人到数据库的函数
-async function updateContactInDB(contactToSave) {
-    if (!isIndexedDBReady) {
-        console.warn('IndexedDB 未准备好，无法更新联系人。');
-        return;
-    }
+// 表情数据结构优化函数（版本4、5用户升级到7时自动执行）
+async function performEmojiOptimization() {
     try {
-        const transaction = db.transaction(['contacts'], 'readwrite');
-        const store = transaction.objectStore('contacts');
-        await promisifyRequest(store.put(contactToSave));
-        await promisifyTransaction(transaction);
-    } catch (error) {
-        console.error(`保存联系人 ${contactToSave.id} 到 IndexedDB 失败:`, error);
-        showToast('保存联系人数据失败');
-    }
-}
-
-// 【新增函数】专门用于高效加载联系人列表
-async function loadContactsForList() {
-    if (!isIndexedDBReady) return [];
-
-    const transaction = db.transaction(['contacts'], 'readonly');
-    const store = transaction.objectStore('contacts');
-    const allContacts = await promisifyRequest(store.getAll());
-
-    // 关键优化：在将数据存入全局变量前，移除庞大的 messages 数组
-    return allContacts.map(contact => {
-        // 创建一个新的联系人对象，只包含列表需要的信息
-        const contactSummary = {
-            id: contact.id,
-            name: contact.name,
-            avatar: contact.avatar,
-            lastMessage: contact.lastMessage,
-            lastTime: contact.lastTime,
-            isPinned: contact.isPinned,
-            type: contact.type,
-            // 保留其他顶层字段，但不包括 messages
-            personality: contact.personality,
-            customPrompts: contact.customPrompts,
-            voiceId: contact.voiceId,
-            thinkMode: contact.thinkMode || 'default',
-            bubbleStyleId: contact.bubbleStyleId,
-            members: contact.members,
-            memoryTableContent: contact.memoryTableContent,
-            worldBook: contact.worldBook || [] // 确保worldBook也被加载
-        };
-        // 我们不再将完整的 contact 对象（包含成千上万条消息）放入内存
-        return contactSummary;
-    });
-}
-
-// 【已重构】此函数现在只加载除联系人外的其他应用状态
-async function loadInitialAppState() {
-    if (!isIndexedDBReady) {
-        console.warn('IndexedDB 未准备好，无法加载数据。');
-        return;
-    }
-    try {
-        const transaction = db.transaction(['apiSettings', 'emojis', 'backgrounds', 'userProfile', 'moments', 'weiboPosts', 'hashtagCache', 'customStyles', 'customModels', 'bubbleStyles', 'bubbleStickers', 'todoItems'], 'readonly');
+        console.log('开始执行表情数据结构优化...');
         
-        // 分别加载各项数据
+        if (!window.isIndexedDBReady) {
+            console.error('数据库未准备就绪，无法执行优化');
+            return;
+        }
+        
+        // 获取当前数据
+        const transaction = window.db.transaction(['contacts', 'emojis', 'emojiImages'], 'readonly');
+        const contactsStore = transaction.objectStore('contacts');
+        const emojisStore = transaction.objectStore('emojis');
+        const emojiImagesStore = transaction.objectStore('emojiImages');
+        
+        const contacts = await promisifyRequest(contactsStore.getAll()) || [];
+        const emojis = await promisifyRequest(emojisStore.getAll()) || [];
+        const existingEmojiImages = await promisifyRequest(emojiImagesStore.getAll()) || [];
+        
+        if (contacts.length === 0 || emojis.length === 0) {
+            console.log('没有数据需要优化，跳过');
+            return;
+        }
+        
+        let processedCount = 0;
+        const base64UrlPattern = /data:image\/[^;]+;base64,[A-Za-z0-9+\/=]+/g;
+        const newEmojiImages = [];
+        const updatedEmojis = [...emojis];
+        const updatedContacts = [];
+        
+        // 遍历所有联系人的消息
+        for (const contact of contacts) {
+            const updatedContact = { ...contact };
+            let contactUpdated = false;
+            
+            if (contact.messages && Array.isArray(contact.messages)) {
+                updatedContact.messages = [];
+                
+                for (const message of contact.messages) {
+                    const updatedMessage = { ...message };
+                    
+                    if (message.content && typeof message.content === 'string') {
+                        const matches = message.content.match(base64UrlPattern);
+                        if (matches) {
+                            for (const base64Url of matches) {
+                                // 查找对应的表情
+                                const emoji = updatedEmojis.find(e => e.url === base64Url);
+                                if (emoji && emoji.meaning) {
+                                    // 检查是否已存在相同的表情图片
+                                    const existingImage = existingEmojiImages.find(img => img.tag === emoji.meaning) ||
+                                                        newEmojiImages.find(img => img.tag === emoji.meaning);
+                                    
+                                    if (!existingImage) {
+                                        newEmojiImages.push({
+                                            tag: emoji.meaning,
+                                            data: base64Url
+                                        });
+                                    }
+                                    
+                                    // 更新表情数据结构
+                                    if (!emoji.tag) {
+                                        emoji.tag = emoji.meaning;
+                                    }
+                                    if (emoji.url) {
+                                        delete emoji.url;
+                                    }
+                                    
+                                    // 替换消息中的格式
+                                    updatedMessage.content = updatedMessage.content.replace(
+                                        base64Url,
+                                        `[emoji:${emoji.meaning}]`
+                                    );
+                                    
+                                    processedCount++;
+                                    contactUpdated = true;
+                                }
+                            }
+                        }
+                    }
+                    
+                    updatedContact.messages.push(updatedMessage);
+                }
+            }
+            
+            if (contactUpdated) {
+                updatedContacts.push(updatedContact);
+            }
+        }
+        
+        // 保存优化后的数据
+        if (processedCount > 0) {
+            const writeTransaction = window.db.transaction(['contacts', 'emojis', 'emojiImages'], 'readwrite');
+            
+            // 更新表情图片数据
+            if (newEmojiImages.length > 0) {
+                const emojiImagesStore = writeTransaction.objectStore('emojiImages');
+                for (const emojiImage of newEmojiImages) {
+                    await promisifyRequest(emojiImagesStore.put(emojiImage));
+                }
+            }
+            
+            // 更新表情元数据
+            const emojisStore = writeTransaction.objectStore('emojis');
+            for (const emoji of updatedEmojis) {
+                if (emoji.tag) { // 只更新有tag的表情
+                    await promisifyRequest(emojisStore.put(emoji));
+                }
+            }
+            
+            // 更新联系人消息
+            const contactsStore = writeTransaction.objectStore('contacts');
+            for (const contact of updatedContacts) {
+                await promisifyRequest(contactsStore.put(contact));
+            }
+            
+            console.log(`表情数据结构优化完成！`);
+            console.log(`- 处理了 ${processedCount} 个表情引用`);
+            console.log(`- 创建了 ${newEmojiImages.length} 个新的表情图片记录`);
+            console.log(`- 更新了 ${updatedContacts.length} 个联系人的消息`);
+            
+            // 显示提示
+            if (typeof showToast === 'function') {
+                showToast(`表情数据优化完成！处理了 ${processedCount} 个表情`, 'success');
+            }
+            
+            // 重新加载数据以确保界面同步
+            await loadDataFromDB();
+        } else {
+            console.log('没有需要优化的表情数据');
+        }
+        
+    } catch (error) {
+        console.error('表情数据优化失败:', error);
+        if (typeof showToast === 'function') {
+            showToast('表情数据优化失败: ' + error.message, 'error');
+        }
+    }
+}
+
+async function loadDataFromDB() {
+    return await ensureDBReady(async () => {
+        console.log('[FIXED] 开始从数据库加载数据，使用 window.db...');
+        
+        const storeNames = [
+        'contacts', 
+        'apiSettings', 
+        'emojis', 
+        'backgrounds', 
+        'userProfile', 
+        'moments', 
+        'weiboPosts', 
+        'hashtagCache'
+        ];
+
+        // 先检查存不存在 emojiImages
+        if (window.db.objectStoreNames.contains('emojiImages')) {
+            storeNames.push('emojiImages');
+        } else {
+            console.warn('数据库版本未包含 emojiImages 存储，建议更新页面以升级数据库。');
+        }
+        
+        const transaction = window.db.transaction(storeNames, 'readonly');
+        
+        const contactsStore = transaction.objectStore('contacts');
         const apiSettingsStore = transaction.objectStore('apiSettings');
         const emojisStore = transaction.objectStore('emojis');
         const backgroundsStore = transaction.objectStore('backgrounds');
         const userProfileStore = transaction.objectStore('userProfile');
         const momentsStore = transaction.objectStore('moments');
         const weiboPostsStore = transaction.objectStore('weiboPosts');
-        const bubbleStylesStore = transaction.objectStore('bubbleStyles');
-        const todoItemsStore = transaction.objectStore('todoItems');
-
-        // 使用 Promise.all 并行加载，速度更快
-        const [
-            savedApiSettings, savedEmojis, savedBackgrounds, savedUserProfile, 
-            savedMoments, savedWeiboPosts, savedBubbleStyles,
-            savedTodos
-        ] = await Promise.all([
-            promisifyRequest(apiSettingsStore.get('settings')),
-            promisifyRequest(emojisStore.getAll()),
-            promisifyRequest(backgroundsStore.get('backgroundsMap')),
-            promisifyRequest(userProfileStore.get('profile')),
-            promisifyRequest(momentsStore.getAll()),
-            promisifyRequest(weiboPostsStore.getAll()),
-            promisifyRequest(bubbleStylesStore.get('styles')),
-            promisifyRequest(todoItemsStore.getAll())
-        ]);
         
-        // --- 开始处理加载到的数据 ---
-        apiSettings = { ...apiSettings, ...(savedApiSettings || {}) };
-        if (apiSettings.contextMessageCount === undefined) apiSettings.contextMessageCount = 10;
-        if (apiSettings.showUsageStats === undefined) apiSettings.showUsageStats = true;
-        if (apiSettings.priceHit === undefined) apiSettings.priceHit = 1.0;
-        if (apiSettings.priceMiss === undefined) apiSettings.priceMiss = 12.0;
-        if (apiSettings.priceOut === undefined) apiSettings.priceOut = 24.0;
-        apiSettings.contextMessageCount = Math.min(
-            CONTEXT_MESSAGE_MAX,
-            Math.max(1, Number(apiSettings.contextMessageCount) || 10)
-        );
-        if (savedApiSettings?.elevenLabsApiKey && !savedApiSettings.minimaxApiKey) {
-            apiSettings.minimaxApiKey = savedApiSettings.elevenLabsApiKey;
-        }
-
-        emojis = (savedEmojis || []).map(emoji => emoji.type ? emoji : { ...emoji, type: 'url' });
-        backgrounds = savedBackgrounds || {};
-        userProfile = { ...userProfile, ...(savedUserProfile || {}) };
-        if (userProfile.wallet === undefined) {
-            userProfile.wallet = { balance: 0, transactions: [] };
-        }
-        moments = savedMoments || [];
-        weiboPosts = savedWeiboPosts || [];
-        if (savedBubbleStyles) {
-            bubbleStyles = savedBubbleStyles.data;
-        }
-        todoItems = savedTodos || []; // 加载待办事项
-
-        console.log("核心应用状态加载完成。");
-
-    } catch (error) {
-        console.error('从IndexedDB加载核心应用状态失败:', error);
-        showToast('加载应用设置失败');
-    }
-}
-
-// 【新增函数】专门用于高效加载联系人列表
-async function loadContactsForList() {
-    if (!isIndexedDBReady) return [];
-    
-    const transaction = db.transaction(['contacts'], 'readonly');
-    const store = transaction.objectStore('contacts');
-    const allContacts = await promisifyRequest(store.getAll());
-
-    // 关键优化：在将数据存入全局变量前，移除庞大的 messages 数组
-    return allContacts.map(contact => {
-        // 创建一个新的联系人对象，只包含列表需要的信息
-        const contactSummary = {
-            id: contact.id,
-            name: contact.name,
-            avatar: contact.avatar,
-            lastMessage: contact.lastMessage,
-            lastTime: contact.lastTime,
-            isPinned: contact.isPinned,
-            type: contact.type,
-            // 保留其他顶层字段，但不包括 messages
-            personality: contact.personality,
-            customPrompts: contact.customPrompts,
-            voiceId: contact.voiceId,
-            thinkMode: contact.thinkMode || 'default',
-            bubbleStyleId: contact.bubbleStyleId,
-            members: contact.members,
-            memoryTableContent: contact.memoryTableContent
-        };
-        // 我们不再将完整的 contact 对象（包含成千上万条消息）放入内存
-        return contactSummary;
-    });
-}
-
-// 【新增函数】根据联系人ID从数据库加载完整的联系人数据（包含消息）
-async function getFullContactFromDB(contactId) {
-    if (!isIndexedDBReady) return null;
-    const transaction = db.transaction(['contacts'], 'readonly');
-    const store = transaction.objectStore('contacts');
-    return await promisifyRequest(store.get(contactId));
-}
-
-// =================================================================
-// 新增：用于将计划任务消息同步到聊天记录的函数
-// =================================================================
-/**
- * 在通知触发时，将AI生成的提醒消息添加到对应的聊天记录中。
- * @param {object} todoItem - 包含提醒信息的待办事项对象。
- * 需要包含: reminderAuthor, reminderMessage。
- */
-async function syncTodoMessageToChat(todoItem) {
-    if (!todoItem || !todoItem.reminderAuthor || !todoItem.reminderMessage) {
-        console.error('无法同步提醒消息：缺少必要信息。', todoItem);
-        return;
-    }
-
-    try {
-        // 1. 根据作者名找到对应的联系人
-        const authorName = todoItem.reminderAuthor;
-        // 【【【 关键修复：确保 contacts 数组已加载 】】】
-        // 这里的 contacts 依赖于 init() 函数先完成加载
-        if (!contacts || contacts.length === 0) {
-            console.warn('联系人列表尚未加载，稍后重试同步...');
-            // 如果 contacts 为空（可能 init 还没加载完），则延迟重试
-            setTimeout(() => syncTodoMessageToChat(todoItem), 1000);
-            return;
-        }
+        // 加载联系人数据
+        contacts = (await promisifyRequest(contactsStore.getAll(), '加载联系人数据')) || [];
+        console.log(`[DEBUG] 从数据库加载了 ${contacts.length} 个联系人`);
         
-        const contact = contacts.find(c => c.name === authorName);
-
-        if (!contact) {
-            console.warn(`未找到名为 "${authorName}" 的联系人，无法同步提醒消息。`);
-            // 也可以选择创建一个系统通知，告知用户该角色可能已被删除
-            showToast(`角色 "${authorName}" 不存在，提醒消息无法显示在聊天中。`);
-            return;
-        }
-
-        // 2. 从数据库获取完整的联系人数据（包含消息历史）
-        const fullContactData = await getFullContactFromDB(contact.id);
-        if (!fullContactData) {
-            console.error('获取联系人完整数据失败，无法同步。');
-            return;
-        }
+        // 更新全局引用
+        window.contacts = contacts;
         
-        // 【【【 新增查重逻辑 】】】
-        // 检查最后一条消息是否就是这条提醒，防止重复添加
-        const lastMsg = fullContactData.messages[fullContactData.messages.length - 1];
-        if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content === todoItem.reminderMessage) {
-            console.log(`提醒消息 "${todoItem.reminderMessage.substring(0, 10)}..." 已存在，跳过同步。`);
-            return; // 消息已存在，直接返回
-        }
-
-        // 【【【 核心修改：使用通知触发时间作为消息时间 】】】
-        const notificationTime = new Date(new Date(todoItem.dueDate).getTime() - 10 * 60 * 1000);
-
-        const aiMessage = {
-            role: 'assistant',
-            content: todoItem.reminderMessage,
-            type: 'text',
-            time: notificationTime.toISOString(), // <-- 使用 2:50 PM 的时间
-            senderId: contact.id,
-            forceVoice: false // 提醒消息默认不使用语音
-        };
-
-        // 4. 将新消息添加到聊天记录中
-        fullContactData.messages.push(aiMessage);
-        fullContactData.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
-        
-        const newLastMsg = fullContactData.messages[fullContactData.messages.length - 1];
-        fullContactData.lastMessage = `[待办提醒] ${newLastMsg.content.substring(0, 20)}...`;
-        fullContactData.lastTime = newLastMsg.time;
-
-        // 5. 将更新后的联系人数据保存回数据库
-        await updateContactInDB(fullContactData);
-
-        console.log(`已将提醒消息同步到 "${contact.name}" 的聊天记录中。`);
-
-        // 6. （可选但推荐）更新UI
-        // 如果用户当前正在查看这个聊天，则刷新聊天界面
-        if (currentContact && currentContact.id === contact.id) {
-            // 将完整的消息数组附加到我们当前的联系人对象上
-            currentContact.messages = fullContactData.messages || [];
-            await renderMessages(true); // 重新渲染并滚动到底部
-        }
-
-        // 更新联系人列表的最后消息
-        const contactInList = contacts.find(c => c.id === contact.id);
-        if (contactInList) {
-            contactInList.lastMessage = fullContactData.lastMessage;
-            contactInList.lastTime = fullContactData.lastTime;
-        }
-        renderContactList(); // 刷新联系人列表显示
-
-    } catch (error) {
-        console.error('同步待办提醒到聊天时出错:', error);
-        showToast('同步提醒消息时发生错误。');
-    }
-}
-
-/**
- * @description 【【【 核心函数：处理待处理的通知 】】】
- * 在App启动或恢复时调用此函数
- */
-async function processPendingTodoMessages() {
-    const PENDING_KEY = 'pendingTodoMessages'; // <-- 读取这个KEY
-    let pendingMessages = [];
-    let processedSomething = false; // 标记是否处理了消息
-
-    // 1. 从 localStorage 中读取队列
-    try {
-        const storedData = localStorage.getItem(PENDING_KEY);
-        if (storedData) {
-            pendingMessages = JSON.parse(storedData);
-        }
-    } catch (e) {
-        console.error("解析[待处理]的消息队列失败:", e);
-        localStorage.removeItem(PENDING_KEY); // 数据损坏，清空
-        return;
-    }
-
-    // 2. 检查队列是否为空
-    if (pendingMessages.length === 0) {
-        // console.log("没有待处理的日程提醒。");
-        return;
-    }
-
-    console.log(`检测到 ${pendingMessages.length} 条[待处理]的日程提醒，正在检查...`);
-
-    // 3. 确保数据库已准备就绪
-    if (!isIndexedDBReady) {
-        console.warn("数据库尚未就绪，稍后重试同步日程...");
-        setTimeout(processPendingTodoMessages, 1000); 
-        return;
-    }
-    
-    const now = new Date();
-    const stillPending = []; // 存放尚未到期的任务
-    const itemsToProcess = []; // 存放已到期的任务
-
-    // 【【【 核心修改：检查通知时间，而不是截止时间 】】】
-    for (const item of pendingMessages) {
-        // 重新计算通知应该弹出的时间
-        const notificationTime = new Date(new Date(item.dueDate).getTime() - 10 * 60 * 1000);
-        
-        if (notificationTime <= now) {
-            // 如果"通知时间"(2:50 PM) 已经过了
-            itemsToProcess.push(item);
+        // [DEBUG-MOMENTS-ROLES-START] 调试信息，修复完成后删除
+        if (contacts.length > 0) {
+            const privateContacts = contacts.filter(c => c.type === 'private');
+            console.log('[DEBUG] contacts数据加载详情:', {
+                totalContacts: contacts.length,
+                privateContacts: privateContacts.length,
+                contactsList: contacts.map(c => ({ name: c.name, id: c.id, type: c.type })),
+                windowContactsSet: !!window.contacts,
+                windowContactsLength: window.contacts ? window.contacts.length : 0
+            });
         } else {
-            // 如果"通知时间"还没到
-            stillPending.push(item);
+            console.warn('[DEBUG] 数据库中没有找到任何联系人数据');
         }
-    }
-    // 【【【 修改结束 】】】
-
-    // 5. 如果没有需要立即处理的任务，直接返回
-    if (itemsToProcess.length === 0) {
-        console.log("所有待处理任务均未到通知时间。");
-        return;
-    }
-    
-    // 6. 处理所有已到期的任务
-    processedSomething = true;
-    showToast(`正在同步 ${itemsToProcess.length} 条日程提醒...`);
-
-    // 按时间顺序排序，确保消息按正确顺序添加
-    itemsToProcess.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
-
-    for (const item of itemsToProcess) {
-        try {
-            await syncTodoMessageToChat(item);
-        } catch (error) {
-            console.error("同步一条[待处理]的消息时出错:", error, item);
-        }
-    }
-
-    // 7. 【重要】将"尚未到期"的任务存回 localStorage
-    localStorage.setItem(PENDING_KEY, JSON.stringify(stillPending));
-    console.log(`[待处理]日程提醒同步完成: ${itemsToProcess.length} 条已处理, ${stillPending.length} 条仍待处理。`);
-}
-
-// =================================================================
-// 新增：AI主动发消息核心逻辑 (Watchdog 模式)
-// =================================================================
-
-/**
- * 1. 核心生成函数：筛选角色 -> 生成内容 -> 安排初始通知
- * 只有在用户停留满 2 分钟且没有待发送消息时才会触发
- */
-async function generateProactiveMessage() {
-    // 基础检查
-    if (!contacts || contacts.length === 0) return;
-    if (!apiSettings.url || !apiSettings.key) return;
-
-    // 筛选条件：私聊角色 + 超过1小时没有互动 + 不是当前正在聊天的角色
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    const candidates = contacts.filter(c => {
-        const lastMsgTime = new Date(c.lastTime);
-        const isNotCurrent = !currentContact || c.id !== currentContact.id;
-        return c.type === 'private' && lastMsgTime < oneHourAgo && isNotCurrent;
-    });
-
-    if (candidates.length === 0) {
-        console.log("[主动关怀] 没有符合条件的角色（所有角色最近都有互动）。");
-        return;
-    }
-
-    // 随机抽取一名幸运角色
-    const targetChar = candidates[Math.floor(Math.random() * candidates.length)];
-    console.log(`[主动关怀] 选中角色: ${targetChar.name}，正在生成消息...`);
-
-    try {
-        // 构建提示词
-        const memoryContext = targetChar.memoryTableContent || "暂无记忆";
-        const prompt = `
-        你扮演角色：${targetChar.name}。
-
-        用户昵称：${userProfile.name}。
-
-        【你的记忆】：${memoryContext}
-
-        【任务】：你已经一个多小时没理用户了。请根据记忆或性格，主动发一条消息。
-
-        【要求】：简短自然，口语化，像微信消息。不要任何动作描写。不要解释。
-
-        `;
-
-        // 调用 API
-        const data = await window.apiService.callOpenAIAPI(
-            apiSettings.url,
-            apiSettings.key,
-            apiSettings.model,
-            [{ role: 'user', content: prompt }],
-            { temperature: 0.8 },
-            (apiSettings.timeout || 60) * 1000
-        );
-
-        const messageContent = data.choices[0].message.content.trim();
-        if (!messageContent) return;
-
-        // --- 安排通知 (1小时后) ---
-        const fireTime = new Date(Date.now() + PROACTIVE_WAIT_TIME);
-        const notificationId = 999999 + Math.floor(Math.random() * 10000); // 随机ID
-
-        const pendingItem = {
-            id: notificationId,
-            contactId: targetChar.id,
-            contactName: targetChar.name,
-            content: messageContent,
-            dueDate: fireTime.toISOString(),
-            status: 'pending'
-        };
-
-        // 1. 调用通知管理器安排通知
-        if (window.notificationManager) {
-            await window.notificationManager.scheduleNotification({
-                id: notificationId,
-                title: targetChar.name,
-                body: messageContent,
-                schedule: fireTime,
-                extra: { type: 'proactive_ai', ...pendingItem }
-            });
-        }
-
-        // 2. 存入 Storage
-        localStorage.setItem(PROACTIVE_STORAGE_KEY, JSON.stringify(pendingItem));
-        console.log(`[主动关怀] 消息已生成。初始触发时间: ${fireTime.toLocaleTimeString()}`);
-
-    } catch (error) {
-        console.error("[主动关怀] 生成失败:", error);
-    }
-}
-
-/**
- * 2. 刷新/续命函数 (Watchdog)
- * 作用：只要用户还在，就把通知时间重新推迟到"1小时后"
- */
-async function refreshProactiveNotification() {
-    const storedData = localStorage.getItem(PROACTIVE_STORAGE_KEY);
-    if (!storedData) return; // 如果还没生成过消息，就不需要续命
-
-    try {
-        const pendingItem = JSON.parse(storedData);
+        // [DEBUG-MOMENTS-ROLES-END]
         
-        // 计算新的触发时间：当前时间 + 1小时
-        const newFireTime = new Date(Date.now() + PROACTIVE_WAIT_TIME);
-        
-        console.log(`[主动关怀-看门狗] 用户依然在线，将通知推迟到: ${newFireTime.toLocaleTimeString()}`);
-
-        // 更新系统通知时间
-        if (window.notificationManager) {
-            // 先取消旧的
-            await window.notificationManager.cancel(pendingItem.id);
-            // 重新安排新的
-            await window.notificationManager.scheduleNotification({
-                id: pendingItem.id,
-                title: pendingItem.contactName,
-                body: pendingItem.content,
-                schedule: newFireTime,
-                extra: { type: 'proactive_ai', ...pendingItem } 
-            });
-        }
-
-        // 更新本地存储的时间
-        pendingItem.dueDate = newFireTime.toISOString();
-        localStorage.setItem(PROACTIVE_STORAGE_KEY, JSON.stringify(pendingItem));
-
-    } catch (e) {
-        console.error("[主动关怀] 刷新时间失败:", e);
-    }
-}
-
-/**
- * 3. 结算逻辑：处理"已过期"的消息
- * App 启动或切回前台时调用。如果发现通知时间已过，说明通知发出了，将其写入聊天记录。
- */
-async function processProactiveMessagesResult() {
-    const storedData = localStorage.getItem(PROACTIVE_STORAGE_KEY);
-    if (!storedData) return;
-
-    try {
-        const pendingItem = JSON.parse(storedData);
-        const fireTime = new Date(pendingItem.dueDate);
-        const now = new Date();
-
-        // 如果 当前时间 > 设定触发时间，说明通知已经发给用户了
-        if (now >= fireTime) {
-            console.log(`[主动关怀] 检测到 "${pendingItem.contactName}" 的消息已推送，同步到聊天记录...`);
-
-            const contact = contacts.find(c => c.id === pendingItem.contactId);
-            if (contact) {
-                const fullContact = await getFullContactFromDB(contact.id);
-                if (fullContact) {
-                    // 写入消息
-                    const aiMessage = {
-                        role: 'assistant',
-                        content: pendingItem.content,
-                        type: 'text',
-                        time: fireTime.toISOString(),
-                        senderId: contact.id
-                    };
-                    fullContact.messages.push(aiMessage);
-                    fullContact.lastMessage = pendingItem.content;
-                    fullContact.lastTime = aiMessage.time;
-                    
-                    await updateContactInDB(fullContact);
-                    
-                    // 刷新UI
-                    renderContactList();
-                    if (currentContact && currentContact.id === contact.id) {
-                        currentContact.messages = fullContact.messages;
-                        renderMessages(true);
-                    }
-                    showToast(`收到来自 ${contact.name} 的新消息`);
-                }
+        // 迁移旧数据格式或添加默认值
+        contacts.forEach(contact => {
+            if (contact.type === undefined) contact.type = 'private';
+            // 为旧联系人数据添加 voiceId 默认值
+            if (contact.voiceId === undefined) contact.voiceId = '';
+            window.memoryTableManager.initContactMemoryTable(contact);
+            if (contact.messages) {
+                contact.messages.forEach(msg => {
+                    if (msg.role === 'user' && msg.senderId === undefined) msg.senderId = 'user';
+                    else if (msg.role === 'assistant' && msg.senderId === undefined) msg.senderId = contact.id;
+                });
             }
-            // 处理完毕，清除 Storage
-            localStorage.removeItem(PROACTIVE_STORAGE_KEY);
-        } else {
-            // 还没到时间，说明用户提前回来了，什么都不用做，
-            // 稍后 startProactiveTimer 会自动接管并推迟时间
-        }
-    } catch (e) {
-        console.error("[主动关怀] 处理结果失败:", e);
-        localStorage.removeItem(PROACTIVE_STORAGE_KEY);
-    }
-}
-
-// =================================================================
-// To-Do List Functions
-// =================================================================
-
-/**
- * Shows the To-Do List modal and renders the list.
- */
-function showTodoModal() {
-    renderTodoList();
-    showModal('todoModal');
-}
-
-/**
- * Renders the list of to-do items in the modal.
- */
-function renderTodoList() {
-    const container = document.getElementById('todoListContainer');
-    container.innerHTML = '';
-
-    if (todoItems.length === 0) {
-        container.innerHTML = '<p style="text-align:center; color:#999;">还没有待办事项。</p>';
-        return;
-    }
-    
-    // Sort items: incomplete first, then by due date
-    const sortedItems = [...todoItems].sort((a, b) => {
-        if (a.completed !== b.completed) return a.completed - b.completed;
-        return new Date(a.dueDate) - new Date(b.dueDate);
-    });
-
-    sortedItems.forEach(item => {
-        const itemDiv = document.createElement('div');
-        itemDiv.className = `todo-item ${item.completed ? 'completed' : ''}`;
-        itemDiv.dataset.id = item.id;
-
-        const formattedDate = new Date(item.dueDate).toLocaleString('zh-CN', {
-            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
         });
 
-        itemDiv.innerHTML = `
-            <input type="checkbox" class="todo-checkbox" onchange="toggleTodoStatus(${item.id})" ${item.completed ? 'checked' : ''}>
-            <div class="todo-details">
-                <span class="todo-text">${escapeHtml(item.text)}</span>
-            </div>
-            <button class="todo-delete-btn" onclick="deleteTodo(${item.id})">×</button>
-        `;
-        container.appendChild(itemDiv);
-    });
-}
-
-/**
- * Handles adding a new to-do item.
- */
-async function addTodo(event) {
-    event.preventDefault();
-    const textInput = document.getElementById('todoInput');
-    const dateInput = document.getElementById('todoDateInput');
-
-    const text = textInput.value.trim();
-    const dueDate = dateInput.value;
-
-    if (!text || !dueDate) {
-        showToast('请填写任务和时间');
-        return;
-    }
-    
-    const dueDateObj = new Date(dueDate);
-    if (dueDateObj < new Date()) {
-        showToast('提醒时间不能早于当前时间');
-        return;
-    }
-    
-    // Disable form while processing
-    const submitBtn = event.target.querySelector('button[type="submit"]');
-    submitBtn.disabled = true;
-    submitBtn.textContent = '正在添加...';
-
-    try {
-        // --- AI Integration Step ---
-        const { reminderMessage, reminderAuthor } = await generateTodoReminder(text, dueDate);
-
-        const newItem = {
-            // id will be auto-generated by IndexedDB
-            text: text,
-            dueDate: dueDate,
-            completed: false,
-            reminderMessage: reminderMessage,
-            reminderAuthor: reminderAuthor
-        };
+        // 加载API设置
+        const savedApiSettings = (await promisifyRequest(apiSettingsStore.get('settings'), '加载API设置')) || {};
+        apiSettings = { ...apiSettings, ...savedApiSettings };
+        if (apiSettings.contextMessageCount === undefined) apiSettings.contextMessageCount = 10;
         
-        // Save to DB and get the new ID
-        const transaction = db.transaction(['todoItems'], 'readwrite');
-        const store = transaction.objectStore('todoItems');
-        const newId = await promisifyRequest(store.add(newItem));
-        newItem.id = newId; // Assign the auto-generated ID
+        // minimax配置现在直接存储在localStorage中，不再通过apiSettings管理
+
+        // 为旧API设置数据添加 elevenLabsApiKey 默认值
+        if (apiSettings.elevenLabsApiKey === undefined) apiSettings.elevenLabsApiKey = '';
+        // 更新全局引用
+        window.apiSettings = apiSettings;
+        console.log('API设置加载完成');
+
+        // 加载表情数据
+        emojis = (await promisifyRequest(emojisStore.getAll(), '加载表情数据')) || [];
+        console.log(`加载了 ${emojis.length} 个表情`);
         
-        todoItems.push(newItem); // Update in-memory array
-
-        // --- Notification Scheduling Step ---
-        scheduleNotification(newItem);
+        // 加载背景数据
+        backgrounds = (await promisifyRequest(backgroundsStore.get('backgroundsMap'), '加载背景数据')) || {};
+        console.log(`加载了 ${Object.keys(backgrounds).length} 个背景`);
         
-        showToast('新任务已添加！');
-        textInput.value = '';
-        dateInput.value = '';
-        renderTodoList();
-
-    } catch (error) {
-        console.error("添加待办事项失败:", error);
-        showToast("添加失败: " + error.message);
-    } finally {
-        submitBtn.disabled = false;
-        submitBtn.textContent = '添加';
-    }
-}
-
-/**
- * Toggles the completion status of a to-do item.
- */
-async function toggleTodoStatus(itemId) {
-    const item = todoItems.find(i => i.id === itemId);
-    if (item) {
-        item.completed = !item.completed;
-        await saveDataToDB(); // Save the whole array
-        renderTodoList();
-
-        // If completed, cancel notification. If un-completed, reschedule it.
-        if (item.completed) {
-            cancelNotification(item.id);
-            showToast('任务已完成！提醒已取消。');
-        } else {
-            scheduleNotification(item);
-            showToast('任务已恢复。');
+        // 加载用户资料
+        const savedUserProfile = (await promisifyRequest(userProfileStore.get('profile'), '加载用户资料')) || {};
+        userProfile = { ...userProfile, ...savedUserProfile };
+        if (userProfile.personality === undefined) {
+            userProfile.personality = '';
         }
-    }
-}
-
-/**
- * Deletes a to-do item.
- */
-async function deleteTodo(itemId) {
-    todoItems = todoItems.filter(i => i.id !== itemId);
-    await saveDataToDB();
-    renderTodoList();
-    
-    // Also cancel any scheduled notification for this item
-    cancelNotification(itemId);
-    showToast('任务已删除');
-}
-
-/**
- * Generates a to-do reminder message using a random AI character.
- * @param {string} taskText The text of the to-do item.
- * @param {string} taskDate The due date of the to-do item.
- * @returns {Promise<{reminderMessage: string, reminderAuthor: string}>}
- */
-
-/**
- * Schedules a notification for a to-do item.
- * @param {object} item - The to-do item.
- */
-function scheduleNotification(item) {
-    if (window.notificationManager) {
-        window.notificationManager.schedule(item);
-    } else {
-        console.warn('Notification manager is not available.');
-    }
-}
-
-/**
- * Cancels a notification for a to-do item.
- * @param {number} itemId - The ID of the to-do item.
- */
-function cancelNotification(itemId) {
-    if (window.notificationManager) {
-        window.notificationManager.cancel(itemId);
-    } else {
-        console.warn('Notification manager is not available.');
-    }
-}
-
-async function generateTodoReminder(taskText, taskDate) {
-    const characters = contacts.filter(c => c.type === 'private');
-    if (characters.length === 0) {
-        return { 
-            reminderMessage: `记得完成任务: ${taskText}`, 
-            reminderAuthor: '系统' 
-        };
-    }
-
-    const randomChar = characters[Math.floor(Math.random() * characters.length)];
-    
-    // Check for API settings
-    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
-        showToast('API未配置，使用默认提醒');
-        return { 
-            reminderMessage: `记得完成任务: ${taskText}`, 
-            reminderAuthor: randomChar.name 
-        };
-    }
-    
-    const prompt = window.promptBuilder.buildTodoReminderPrompt(randomChar, userProfile, taskText, taskDate);
-    
-    try {
-        const data = await window.apiService.callOpenAIAPI(
-            apiSettings.url,
-            apiSettings.key,
-            apiSettings.model, // Use primary model
-            [{ role: 'user', content: prompt }],
-            { temperature: 0.8 },
-            (apiSettings.timeout || 60) * 1000
-        );
+        console.log('用户资料加载完成');
         
-        const reminderMessage = data.choices[0].message.content.trim();
-        return {
-            reminderMessage: reminderMessage,
-            reminderAuthor: randomChar.name
-        };
-    } catch (error) {
-        console.error("AI提醒生成失败:", error);
-        showToast("AI提醒生成失败，将使用默认提醒。");
-        return { 
-            reminderMessage: `别忘了做这件事: ${taskText}`, 
-            reminderAuthor: randomChar.name 
-        };
-    }
+        // 加载朋友圈数据
+        moments = (await promisifyRequest(momentsStore.getAll(), '加载朋友圈数据')) || [];
+        console.log(`加载了 ${moments.length} 个朋友圈`);
+        
+        // 加载微博数据
+        weiboPosts = (await promisifyRequest(weiboPostsStore.getAll(), '加载微博数据')) || [];
+        console.log(`加载了 ${weiboPosts.length} 个微博帖子`);
+
+        // 加载hashtag缓存
+        const hashtagCacheStore = transaction.objectStore('hashtagCache');
+        const savedHashtagCache = (await promisifyRequest(hashtagCacheStore.get('cache'), '加载标签缓存')) || {};
+        hashtagCache = savedHashtagCache;
+        console.log('标签缓存加载完成');
+
+        // 重新初始化角色记忆管理器的数据（现在数据库已准备好）
+        if (window.characterMemoryManager) {
+            try {
+                await window.characterMemoryManager.loadConversationCounters();
+                await window.characterMemoryManager.getGlobalMemory();
+                console.log('角色记忆管理器初始化完成');
+            } catch (memoryError) {
+                console.error('角色记忆管理器初始化失败:', memoryError);
+            }
+        }
+        
+        // 初始化完成后进行数据一致性检查
+        if (weiboPosts && weiboPosts.length > 0) {
+            const repaired = await checkAndRepairDataConsistency();
+            if (repaired) {
+                console.log('初始化时修复了数据不一致性');
+            }
+        }
+        
+        // 数据库健康检查和修复提示
+        if (window.DatabaseManager && window.DatabaseManager.checkAndOfferRepair) {
+            window.DatabaseManager.checkAndOfferRepair();
+        }
+
+        console.log('所有数据加载完成');
+        showToast('数据加载完成', 'success');
+        
+    }, '数据库加载操作');
 }
 
-// 【已修改】此函数不再保存联系人数据
 async function saveDataToDB() {
-    if (!isIndexedDBReady) {
-        console.warn('IndexedDB 未准备好，无法保存数据。');
-        return;
-    }
-    try {
-        // 【核心修改】在事务中移除了 'contacts'
-        const transaction = db.transaction(['apiSettings', 'emojis', 'backgrounds', 'userProfile', 'moments', 'hashtagCache', 'customModels', 'emojiBlobs', 'todoItems'], 'readwrite');
+    return await ensureDBReady(async () => {
+        console.log('[FIXED] 开始保存数据到数据库，使用 window.db...');
         
-        // 【已删除】所有关于 contactsStore 的代码都已移除
-
-        // 其他数据的保存逻辑保持不变
+        // 检查是否存在新的emojiImages存储
+        const storeNames = ['contacts', 'apiSettings', 'emojis', 'backgrounds', 'userProfile', 'moments', 'hashtagCache'];
+        if (window.db.objectStoreNames.contains('emojiImages')) {
+            storeNames.push('emojiImages');
+        }
+        
+        const transaction = window.db.transaction(storeNames, 'readwrite');
+        
+        const contactsStore = transaction.objectStore('contacts');
         const apiSettingsStore = transaction.objectStore('apiSettings');
         const emojisStore = transaction.objectStore('emojis');
         const backgroundsStore = transaction.objectStore('backgrounds');
         const userProfileStore = transaction.objectStore('userProfile');
         const momentsStore = transaction.objectStore('moments');
-        const emojiBlobsStore = transaction.objectStore('emojiBlobs'); // 获取新表的引用
+        
+        // 清空contacts，然后重新添加，确保数据最新
+        await promisifyRequest(contactsStore.clear(), '清空联系人数据');
+        console.log(`开始保存 ${contacts.length} 个联系人...`);
+        for (const contact of contacts) {
+            await promisifyRequest(contactsStore.put(contact), `保存联系人 ${contact.name || contact.id}`);
+        }
+        console.log('联系人数据保存完成');
 
-        await promisifyRequest(apiSettingsStore.put({ id: 'settings', ...apiSettings }));
+        // 保存API设置
+        await promisifyRequest(apiSettingsStore.put({ id: 'settings', ...apiSettings }), '保存API设置');
+        console.log('API设置保存完成');
         
-        // 【核心修改】所有表情对象现在都完整存入 'emojis' 表
-        await promisifyRequest(emojisStore.clear());
-        // 我们不再需要清空或写入 emojiBlobsStore，但保留事务定义以防万一
-        // await promisifyRequest(emojiBlobsStore.clear()); 
-        
+        // 保存表情数据
+        await promisifyRequest(emojisStore.clear(), '清空表情数据');
+        console.log(`开始保存 ${emojis.length} 个表情...`);
         for (const emoji of emojis) {
-            // 不再需要区分 blob 类型，所有表情对象都直接存入 emojisStore
-            await promisifyRequest(emojisStore.put(emoji));
+            await promisifyRequest(emojisStore.put(emoji), `保存表情 ${emoji.id}`);
         }
+        console.log('表情数据保存完成');
 
-        await promisifyRequest(backgroundsStore.put({ id: 'backgroundsMap', ...backgrounds }));
-        await promisifyRequest(userProfileStore.put({ id: 'profile', ...userProfile }));
+        // 保存背景和用户资料
+        await promisifyRequest(backgroundsStore.put({ id: 'backgroundsMap', ...backgrounds }), '保存背景数据');
+        await promisifyRequest(userProfileStore.put({ id: 'profile', ...userProfile }), '保存用户资料');
+        console.log('背景和用户资料保存完成');
         
-        await promisifyRequest(momentsStore.clear());
+        // 保存朋友圈数据
+        await promisifyRequest(momentsStore.clear(), '清空朋友圈数据');
+        console.log(`开始保存 ${moments.length} 个朋友圈...`);
         for (const moment of moments) {
-            await promisifyRequest(momentsStore.put(moment));
+            await promisifyRequest(momentsStore.put(moment), `保存朋友圈 ${moment.id}`);
         }
+        console.log('朋友圈数据保存完成');
 
         // 保存hashtag缓存
         const hashtagCacheStore = transaction.objectStore('hashtagCache');
-        await promisifyRequest(hashtagCacheStore.put({ id: 'cache', ...hashtagCache }));
+        await promisifyRequest(hashtagCacheStore.put({ id: 'cache', ...hashtagCache }), '保存标签缓存');
+        console.log('标签缓存保存完成');
 
-        const customModelsStore = transaction.objectStore('customModels');
-        await promisifyRequest(customModelsStore.put({ id: 'models', data: customModelsByUrl }));
+        // 等待所有操作完成
+        await promisifyTransaction(transaction, '数据保存事务');
+        console.log('所有数据保存完成');        
+    }, '数据库保存操作');
+}
+
+
+/**
+ * 🔥 简化的数据库初始化函数 - 使用统一数据库管理器
+ * 替代了复杂的 initializeDatabaseOnce 逻辑
+ */
+async function initializeDatabaseOnce() {
+    console.log('🔥 [简化初始化] 使用统一数据库管理器初始化...');
+    
+    try {
+        // 使用统一数据库管理器进行初始化
+        const db = await window.unifiedDB.init();
         
-        // 保存待办事项
-        const todoItemsStore = transaction.objectStore('todoItems');
-        await promisifyRequest(todoItemsStore.clear());
-        for (const item of todoItems) {
-            await promisifyRequest(todoItemsStore.put(item));
-        }
-
-        await promisifyTransaction(transaction); // 等待所有操作完成
-    } catch (error) {
-        console.error('保存数据到IndexedDB失败:', error);
-        showToast('保存数据失败');
-    }
-}
-
-/**
- * 【修改】辅助函数：根据表情对象获取可用的 src URL
- * @param {object} emoji - 表情对象
- * @returns {Promise<string>} - 返回一个 Promise，解析为图片的 URL (http/https 或 data URL)
- */
-function getEmojiSrc(emoji) {
-    return new Promise((resolve) => {
-        // 对于 'url' 和 'base64' 类型，数据都在 emoji.url 字段中
-        if (emoji.url) {
-            resolve(emoji.url);
-        } else {
-            // 如果找不到URL，返回一个占位符
-            console.warn("表情对象缺少url字段:", emoji);
-            resolve('placeholder.png'); // 你可以准备一张表示加载失败的图片
-        }
-    });
-}
-
-// 辅助函数：将IndexedDB请求转换为Promise
-function promisifyRequest(request) {
-    return new Promise((resolve, reject) => {
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-    });
-}
-
-// 辅助函数：将IndexedDB事务转换为Promise
-function promisifyTransaction(transaction) {
-    return new Promise((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-    });
-}
-
-// --- 结构化记忆底座（旁路 IndexedDB，不影响旧 Markdown 记忆表） ---
-function generateMemoryId(prefix) {
-    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-async function saveMemoryEpisode(episode) {
-    if (!isIndexedDBReady || !db || !episode || !episode.id) {
-        return false;
-    }
-    try {
-        if (!db.objectStoreNames.contains('memoryEpisodes')) {
-            console.error('[结构化记忆] memoryEpisodes 不存在，跳过写入');
-            return false;
-        }
-        const transaction = db.transaction(['memoryEpisodes'], 'readwrite');
-        const store = transaction.objectStore('memoryEpisodes');
-        await promisifyRequest(store.put(episode));
-        await promisifyTransaction(transaction);
-        return true;
-    } catch (error) {
-        console.error('[结构化记忆] memoryEpisodes 存储失败:', error);
-        return false;
-    }
-}
-
-async function saveMemoryFacts(facts) {
-    if (!facts || facts.length === 0) {
-        return true;
-    }
-    if (!isIndexedDBReady || !db) {
-        return false;
-    }
-    try {
-        if (!db.objectStoreNames.contains('memoryFacts')) {
-            console.error('[结构化记忆] memoryFacts 不存在，跳过写入');
-            return false;
-        }
-        const transaction = db.transaction(['memoryFacts'], 'readwrite');
-        const store = transaction.objectStore('memoryFacts');
-        for (let i = 0; i < facts.length; i++) {
-            store.put(facts[i]);
-        }
-        await promisifyTransaction(transaction);
-        return true;
-    } catch (error) {
-        console.error('[结构化记忆] memoryFacts 存储失败:', error);
-        return false;
-    }
-}
-
-async function saveMemoryFact(fact) {
-    if (!fact || !fact.id) {
-        return false;
-    }
-    if (!isIndexedDBReady || !db) {
-        return false;
-    }
-    try {
-        if (!db.objectStoreNames.contains('memoryFacts')) {
-            console.error('[结构化记忆] memoryFacts 不存在，跳过单条写入');
-            return false;
-        }
-        const transaction = db.transaction(['memoryFacts'], 'readwrite');
-        const store = transaction.objectStore('memoryFacts');
-        await promisifyRequest(store.put(fact));
-        await promisifyTransaction(transaction);
-        return true;
-    } catch (error) {
-        console.error('[结构化记忆] memoryFacts 单条更新失败:', error);
-        return false;
-    }
-}
-
-async function getMemoryFactsByContact(contactId, { activeOnly = true } = {}) {
-    if (!contactId || !isIndexedDBReady || !db) {
-        return [];
-    }
-    try {
-        if (!db.objectStoreNames.contains('memoryFacts')) {
-            return [];
-        }
-        const transaction = db.transaction(['memoryFacts'], 'readonly');
-        const store = transaction.objectStore('memoryFacts');
-        const index = store.index('contactId');
-        const list = await promisifyRequest(index.getAll(contactId));
-        await promisifyTransaction(transaction);
-        const raw = Array.isArray(list) ? list : [];
-        if (!activeOnly) {
-            return raw;
-        }
-        return raw.filter(f => f && f.status === 'active' && (f.validTo === null || f.validTo === undefined));
-    } catch (error) {
-        console.error('[结构化记忆] getMemoryFactsByContact 读取失败:', error);
-        return [];
-    }
-}
-
-/**
- * memory_diff 中 delete（尤其 section「未来」）时，将匹配的 future/promise 类结构化事实失效，不误伤长期偏好。
- * @param {Array} diffArray
- * @param {object} contact
- * @returns {Promise<Array>}
- */
-async function invalidateFactsFromMemoryDiffDelete(diffArray, contact) {
-    const invalidatedFacts = [];
-    if (!Array.isArray(diffArray) || !contact?.id) {
-        return invalidatedFacts;
-    }
-
-    try {
-        const activeFacts = await getMemoryFactsByContact(contact.id, { activeOnly: true });
-        const now = Date.now();
-        const invalidatedIds = new Set();
-
-        const isFutureIshFact = f => {
-            const m = f.metadata || {};
-            if (m.timeScope === 'future') return true;
-            if (m.type === 'promise' || m.type === 'future_plan') return true;
-            const p = f.predicate != null ? String(f.predicate) : '';
-            return p === 'promise' || p === 'future_plan' || p === 'new_suggestion';
-        };
-
-        const entityMatchesKeyword = (entities, keyword) => {
-            if (!Array.isArray(entities) || keyword === undefined || keyword === null) return false;
-            const kt = String(keyword);
-            for (let i = 0; i < entities.length; i++) {
-                const e = entities[i];
-                if (!e || typeof e !== 'object') continue;
-                const name = e.name != null ? String(e.name) : '';
-                const desc = e.description != null ? String(e.description) : '';
-                if (name.includes(kt) || desc.includes(kt)) return true;
-            }
-            return false;
-        };
-
-        const factMatchesKeyword = (f, keyword) => {
-            if (keyword === undefined || keyword === null || String(keyword).trim() === '') return false;
-            const kt = String(keyword);
-            if (f.factText != null && String(f.factText).includes(kt)) return true;
-            if (f.object != null && String(f.object).includes(kt)) return true;
-            return entityMatchesKeyword(f.metadata && f.metadata.entities, keyword);
-        };
-
-        for (let oi = 0; oi < diffArray.length; oi++) {
-            const op = diffArray[oi];
-            if (!op || op.op !== 'delete') continue;
-            const section = op.section != null ? String(op.section).trim() : '';
-            if (section !== '未来') continue;
-
-            const keyword = op.keyword != null ? String(op.keyword) : '';
-            if (!keyword.trim()) continue;
-
-            for (let fi = 0; fi < activeFacts.length; fi++) {
-                const f = activeFacts[fi];
-                if (!f || invalidatedIds.has(f.id)) continue;
-                if (!isFutureIshFact(f)) continue;
-                if (!factMatchesKeyword(f, keyword)) continue;
-
-                const updated = {
-                    ...f,
-                    status: 'inactive',
-                    validTo: now,
-                    updatedAt: now,
-                    metadata: {
-                        ...(f.metadata || {}),
-                        invalidationReason: `memory_diff delete: ${keyword}`,
-                        invalidationSource: 'memory_diff_delete',
-                        invalidationSection: section,
-                        invalidationKeyword: keyword
-                    }
-                };
-                const ok = await saveMemoryFact(updated);
-                if (ok) {
-                    invalidatedIds.add(f.id);
-                    invalidatedFacts.push(updated);
-                }
+        console.log('🔥 [简化初始化] 数据库初始化成功，版本:', db.version);
+        console.log('🔥 [简化初始化] 可用存储:', Array.from(db.objectStoreNames));
+        
+        // 初始化API配置管理器
+        if (window.apiConfigManager) {
+            try {
+                await window.apiConfigManager.init();
+                console.log('🔥 [简化初始化] API配置管理器初始化完成');
+            } catch (error) {
+                console.error('🔥 [简化初始化] API配置管理器初始化失败:', error);
             }
         }
-
-        console.log(`[结构化记忆] memory_diff delete 触发失效 facts: ${invalidatedFacts.length}`);
-    } catch (e) {
-        console.error('[结构化记忆] invalidateFactsFromMemoryDiffDelete 失败:', e);
-    }
-
-    return invalidatedFacts;
-}
-
-function normalizeText(text) {
-    return String(text ?? '')
-        .toLowerCase()
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-const MEMORY_QUERY_STOP_WORDS = new Set([
-    '用户', '角色', '今天', '现在', '感觉', '觉得', '这个', '那个',
-    '什么', '就是', '可以', '不是', '没有', '真的', '好像', '一下',
-    '有点', '还是', '然后', '但是', '因为', '所以', '我们', '你们',
-    '他们', '自己', '东西', '事情', '问题'
-]);
-
-/** @param {string} normalizedQuery */
-function buildUsefulTokensFromNormalized(normalizedQuery) {
-    const tokens = String(normalizedQuery || '')
-        .split(/[\s\n\r,，。.!！?？、；;:："'“”‘’（）()【】\[\]<>《》]+/)
-        .map(t => t.trim())
-        .filter(t => t.length >= 2);
-
-    const seen = new Set();
-    const usefulTokens = [];
-    for (const t of tokens) {
-        if (seen.has(t)) continue;
-        seen.add(t);
-        if (MEMORY_QUERY_STOP_WORDS.has(t)) continue;
-        usefulTokens.push(t);
-    }
-    return usefulTokens;
-}
-
-function deriveFreshUserMessageText(lastUserMessage, queryText) {
-    if (lastUserMessage != null && String(lastUserMessage).trim() !== '') {
-        return String(lastUserMessage);
-    }
-    const lines = String(queryText ?? '').split(/\n/);
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (line && line.trim()) return line;
-    }
-    return '';
-}
-
-function factAgeDaysApprox(fact) {
-    const t = fact.updatedAt != null ? fact.updatedAt
-        : fact.createdAt != null ? fact.createdAt
-            : fact.validFrom;
-    if (t == null) return 0;
-    let ms;
-    if (typeof t === 'number' && !Number.isNaN(t)) {
-        ms = t;
-    } else if (typeof t === 'string') {
-        const parsed = Date.parse(t);
-        ms = Number.isNaN(parsed) ? NaN : parsed;
-    } else {
-        return 0;
-    }
-    if (!Number.isFinite(ms)) return 0;
-    return Math.max(0, (Date.now() - ms) / 86400000);
-}
-
-/** 中文连续片段 2~4 字 n-gram，用于即时短语命中（量可控） */
-function collectCjkNGrams(text, minLen, maxLen, maxCount) {
-    const norm = normalizeText(text);
-    const runs = norm.match(/[\u4e00-\u9fff]+/g) || [];
-    const out = new Set();
-    outer: for (let r = 0; r < runs.length; r++) {
-        const run = runs[r];
-        const L = run.length;
-        if (!L) continue;
-        for (let len = minLen; len <= Math.min(maxLen, L); len++) {
-            for (let i = 0; i + len <= L; i++) {
-                out.add(run.slice(i, i + len));
-                if (out.size >= maxCount) break outer;
-            }
-        }
-    }
-    return out;
-}
-
-function buildFactSearchText(fact) {
-    if (!fact || typeof fact !== 'object') return '';
-    const parts = [];
-    if (fact.subject != null) parts.push(String(fact.subject));
-    if (fact.predicate != null) parts.push(String(fact.predicate));
-    if (fact.object != null) parts.push(String(fact.object));
-    if (fact.factText != null) parts.push(String(fact.factText));
-    const m = fact.metadata || {};
-    if (m.type != null) parts.push(String(m.type));
-    if (m.timeScope != null) parts.push(String(m.timeScope));
-    if (Array.isArray(m.entities)) {
-        m.entities.forEach(e => {
-            if (!e || typeof e !== 'object') return;
-            if (e.name != null) parts.push(String(e.name));
-            if (e.description != null) parts.push(String(e.description));
-        });
-    }
-    return parts.join(' ');
-}
-
-/**
- * @param {object} fact
- * @param {string} queryText 检索串（通常含本轮用户消息 + 近期上下文）
- * @param {string} [lastUserMessage] 本轮用户纯文本；若省略则从 queryText 首行回退
- */
-function scoreMemoryFact(fact, queryText, lastUserMessage) {
-    if (!fact || fact.status !== 'active') return -Infinity;
-    if (fact.validTo != null && fact.validTo !== undefined) return -Infinity;
-
-    const m = fact.metadata || {};
-    const searchBlob = normalizeText(buildFactSearchText(fact));
-    const qRaw = normalizeText(queryText);
-    const ty = m.type;
-    const timeScope = m.timeScope;
-
-    const imp = typeof fact.importance === 'number' && !Number.isNaN(fact.importance)
-        ? Math.min(1, Math.max(0, fact.importance))
-        : 0.5;
-
-    const conf = typeof fact.confidence === 'number' && !Number.isNaN(fact.confidence)
-        ? Math.min(1, Math.max(0, fact.confidence))
-        : 0.5;
-
-    // baseScore：importance / confidence / type / timeScope 等结构化偏置
-    let baseScore = 0;
-    baseScore += imp * 4;
-    baseScore += conf * 2;
-
-    if (timeScope === 'current') baseScore += 4;
-    if (ty === 'emotional_core') baseScore += 5;
-    if (ty === 'relationship') baseScore += 5;
-    if (ty === 'preference') baseScore += 3;
-    if (timeScope === 'long_term') baseScore += 2;
-
-    const futureIntentRegex = /(约定|答应|说好|说过|计划|安排|以后|之后|下次|明天|今晚|今天晚上|周末|未来|记得|别忘|提醒|要不要|什么时候|一起|见面|去哪|去哪里|做什么|到时候|回头|改天)/;
-    const hasFutureIntent = futureIntentRegex.test(qRaw);
-
-    if (ty === 'promise' || ty === 'future_plan' || timeScope === 'future') {
-        baseScore += 2;
-        if (hasFutureIntent) {
-            baseScore += 8;
-        }
-    }
-
-    if (timeScope === 'temporary' || ty === 'current_state') {
-        baseScore -= 3;
-    }
-
-    // lexicalScore：全 query 切词命中（含上下文字面）
-    let lexicalScore = 0;
-    const usefulTokens = buildUsefulTokensFromNormalized(qRaw);
-
-    if (qRaw.length >= 4 && searchBlob.includes(qRaw)) {
-        lexicalScore += 30;
-    }
-
-    const subj = fact.subject != null ? normalizeText(fact.subject) : '';
-    const pred = fact.predicate != null ? normalizeText(fact.predicate) : '';
-    const obj = fact.object != null ? normalizeText(String(fact.object)) : '';
-    const ft = fact.factText != null ? normalizeText(String(fact.factText)) : '';
-
-    for (const t of usefulTokens) {
-        if (!t || t.length < 2) continue;
-
-        if (searchBlob.includes(t)) {
-            lexicalScore += 5 + Math.min(t.length * 0.5, 5);
-        }
-
-        if (obj.includes(t)) lexicalScore += 8;
-        if (ft.includes(t)) lexicalScore += 8;
-        if (pred.includes(t)) lexicalScore += 3;
-        if (subj.includes(t)) lexicalScore += 1;
-    }
-
-    // freshQueryBoost：仅「本轮用户消息」的关键词 + 2~4 字短语（factText）
-    const freshPlain = deriveFreshUserMessageText(lastUserMessage, queryText);
-    const freshTokens = buildUsefulTokensFromNormalized(normalizeText(freshPlain));
-
-    let freshHitCount = 0;
-    for (let fi = 0; fi < freshTokens.length; fi++) {
-        const t = freshTokens[fi];
-        if (!t || t.length < 2) continue;
-        if (searchBlob.includes(t)) freshHitCount++;
-    }
-
-    let freshKeywordBoost = 0;
-    if (freshHitCount >= 1) {
-        freshKeywordBoost = Math.min(15, 6 + (freshHitCount - 1) * 3);
-    }
-
-    let phraseBoost = 0;
-    const gramSet = collectCjkNGrams(freshPlain, 2, 4, 72);
-    gramSet.forEach(g => {
-        if (!g || g.length < 2 || g.length > 4) return;
-        if (ft.includes(g)) phraseBoost += 4;
-    });
-    phraseBoost = Math.min(12, phraseBoost);
-
-    const freshQueryBoost = freshKeywordBoost + phraseBoost;
-
-    // 老记忆轻微衰减；与本轮高度相关时再补偿（抵消霸榜）
-    const stalePenalty = Math.min(5, factAgeDaysApprox(fact) * 0.1);
-    const highFreshRelevance = freshHitCount >= 2 || phraseBoost >= 8;
-    let relevanceCompensation = 0;
-    if (highFreshRelevance) {
-        relevanceCompensation = Math.min(15, 8 + freshHitCount * 2 + Math.floor(phraseBoost / 4));
-    }
-
-    let score = baseScore + lexicalScore + freshQueryBoost - stalePenalty + relevanceCompensation;
-
-    const hadObviousTextHit = lexicalScore > 0 || freshHitCount > 0 || phraseBoost > 0;
-    if (!hadObviousTextHit) {
-        score -= 4;
-    }
-
-    return score;
-}
-
-/** 精确去重键：S/P/O 有任一非空则拼三重，否则退回 factText */
-function canonicalForExactKey(str) {
-    return String(str ?? '')
-        .toLowerCase()
-        .replace(/\s+/g, '')
-        .replace(/[\u200b\ufeff]/g, '')
-        .replace(/[，,。．\.!！?？、；;:\-—_·…'"“”‘’（）()\[\]【】<>《》]/g, '')
-        .trim();
-}
-
-function buildExactDedupeKey(fact) {
-    if (!fact || typeof fact !== 'object') return '';
-    const s = canonicalForExactKey(fact.subject);
-    const p = canonicalForExactKey(fact.predicate);
-    const o = canonicalForExactKey(fact.object);
-    if (s || p || o) {
-        return `spo:${s}|${p}|${o}`;
-    }
-    return `ft:${canonicalForExactKey(fact.factText)}`;
-}
-
-/**
- * 供 Jaccard 用的 token 集合：仅 factText、subject、object（见需求）
- * 中英文混合：分词 + 汉字 2-gram，避免中文无空格时交集为空
- */
-function tokenSetForFactDedup(fact) {
-    const blob = normalizeText(
-        [fact.factText, fact.subject, fact.object].map(x => String(x ?? '')).join(' ')
-    );
-    const set = new Set();
-    if (blob.length > 0 && blob.length < 2) {
-        set.add(blob);
-        return set;
-    }
-    const parts = blob.split(/[\s\n\r,，。.!！?？、；;:："'“”‘’（）()【】\[\]<>《》]+/);
-    for (let pi = 0; pi < parts.length; pi++) {
-        const p = parts[pi].trim();
-        if (p.length >= 2) set.add(p);
-        const runs = p.match(/[\u4e00-\u9fff]+/g) || [];
-        for (let r = 0; r < runs.length; r++) {
-            const run = runs[r];
-            const L = run.length;
-            if (L < 2) continue;
-            let capped = 0;
-            for (let i = 0; i + 2 <= L && capped < 64; i++) {
-                set.add(run.slice(i, i + 2));
-                capped++;
-            }
-        }
-    }
-    if (set.size === 0 && blob.length >= 2) {
-        set.add(blob.slice(0, 64));
-    }
-    return set;
-}
-
-function jaccardTokenSimilarity(setA, setB) {
-    if (!(setA instanceof Set) || !(setB instanceof Set)) return 0;
-    if (setA.size === 0 && setB.size === 0) return 1;
-    if (setA.size === 0 || setB.size === 0) return 0;
-    let inter = 0;
-    if (setA.size <= setB.size) {
-        setA.forEach(t => {
-            if (setB.has(t)) inter++;
-        });
-    } else {
-        setB.forEach(t => {
-            if (setA.has(t)) inter++;
-        });
-    }
-    const union = setA.size + setB.size - inter;
-    return union > 0 ? inter / union : 0;
-}
-
-function jaccardThresholdForPair(fa, fb, base) {
-    const ma = fa && fa.metadata ? fa.metadata : {};
-    const mb = fb && fb.metadata ? fb.metadata : {};
-    const ta = ma.type;
-    const tb = mb.type;
-    const tsA = ma.timeScope;
-    const tsB = mb.timeScope;
-    if (ta === 'current_state' || tb === 'current_state'
-        || tsA === 'temporary' || tsB === 'temporary') {
-        return Math.min(base, 0.72);
-    }
-    if (ta === 'preference' || ta === 'relationship'
-        || tb === 'preference' || tb === 'relationship') {
-        return Math.max(base, 0.80);
-    }
-    return base;
-}
-
-function exceedPredicateQuota(fact, kept, maxPerPredicate) {
-    if (!maxPerPredicate || maxPerPredicate <= 0) return false;
-    const key = canonicalForExactKey(fact.predicate);
-    if (!key) return false;
-    let n = 0;
-    for (let i = 0; i < kept.length; i++) {
-        if (canonicalForExactKey(kept[i].fact.predicate) === key) n++;
-    }
-    return n >= maxPerPredicate;
-}
-
-/**
- * 检索结果去重：精确键 + Jaccard + 每 predicate 上限；scoredItems 须已按 score 降序
- * @param {{ fact: object, score: number }[]} scoredItems
- * @param {{ simThreshold?: number, maxPerPredicate?: number }} [opts]
- */
-function dedupeSimilarFacts(scoredItems, opts) {
-    const simThreshold = opts && opts.simThreshold != null ? opts.simThreshold : 0.78;
-    const maxPerPredicate = opts && opts.maxPerPredicate != null ? opts.maxPerPredicate : 2;
-    const list = Array.isArray(scoredItems) ? scoredItems : [];
-    const kept = [];
-    const seenExact = new Set();
-
-    for (let i = 0; i < list.length; i++) {
-        const item = list[i];
-        if (!item || !item.fact) continue;
-        const f = item.fact;
-
-        const exactKey = buildExactDedupeKey(f);
-        if (exactKey && seenExact.has(exactKey)) continue;
-
-        let tooSimilar = false;
-        const tokensF = tokenSetForFactDedup(f);
-        for (let k = 0; k < kept.length; k++) {
-            const other = kept[k].fact;
-            const th = jaccardThresholdForPair(f, other, simThreshold);
-            const sim = jaccardTokenSimilarity(tokensF, tokenSetForFactDedup(other));
-            if (sim >= th) {
-                tooSimilar = true;
-                break;
-            }
-        }
-        if (tooSimilar) continue;
-
-        if (exceedPredicateQuota(f, kept, maxPerPredicate)) continue;
-
-        kept.push(item);
-        if (exactKey) seenExact.add(exactKey);
-    }
-    return kept;
-}
-
-async function retrieveRelevantMemoryFacts(contactId, queryText, options = {}) {
-    try {
-        const limit = Math.min(Math.max(options.limit != null ? options.limit : 25, 1), 25);
-        const minScore = options.minScore != null ? options.minScore : 5;
-
-        const facts = await getMemoryFactsByContact(contactId, { activeOnly: true });
-        const qPreview = String(queryText ?? '');
-        console.log('[记忆检索] query:', qPreview.length > 400 ? `${qPreview.slice(0, 400)}…` : qPreview);
-
-        const scored = facts
-            .map(f => ({
-                fact: f,
-                score: scoreMemoryFact(f, queryText, options.lastUserMessage)
-            }))
-            .filter(x => Number.isFinite(x.score))
-            .sort((a, b) => b.score - a.score);
-
-        let picked = scored.filter(x => x.score >= minScore).slice(0, limit);
-        if (picked.length === 0 && scored.length > 0 && scored[0].score > 0) {
-            picked = scored.slice(0, Math.min(limit, 8));
-        }
-
-        const dedupeSimThreshold = options.dedupeSimThreshold != null ? options.dedupeSimThreshold : 0.78;
-        const maxPerPredicate = options.maxPerPredicate != null ? options.maxPerPredicate : 2;
-        picked = dedupeSimilarFacts(picked, {
-            simThreshold: dedupeSimThreshold,
-            maxPerPredicate
-        }).slice(0, limit);
-
-        const resultFacts = picked.map(({ fact, score }) => ({
-            ...fact,
-            _retrievalScore: score
-        }));
-        console.log('[记忆检索] 命中 facts 数量:', resultFacts.length);
-        if (picked.length > 0) {
-            console.table(picked.map(({ fact, score }) => ({
-                score: Math.round(score * 10) / 10,
-                subject: (fact.subject || '').slice(0, 24),
-                predicate: (fact.predicate || '').slice(0, 28),
-                factText: (fact.factText || '').slice(0, 48)
-            })));
-        }
-
-        return resultFacts;
-    } catch (e) {
-        console.warn('[记忆检索] retrieveRelevantMemoryFacts 失败:', e);
-        return [];
-    }
-}
-
-function buildRelevantMemoryFactsBlock(facts) {
-    if (!Array.isArray(facts) || facts.length === 0) {
-        return '';
-    }
-
-    let out = '--- [相关结构化长期记忆] ---\n';
-    out += '以下是从长期记忆库中检索到的、与当前对话最相关的事实。请自然参考，不要机械复述，不要暴露数据库字段。\n\n';
-    out += '<relevant_memory_facts>\n';
-
-    facts.forEach((fact, idx) => {
-        const m = fact.metadata || {};
-        const mainLine = fact.factText || fact.object || '(无描述)';
-        out += `${idx + 1}. ${mainLine}\n`;
-        if (m.type != null) out += `   - 类型: ${m.type}\n`;
-        if (m.timeScope != null) out += `   - 时间范围: ${m.timeScope}\n`;
-        if (typeof fact.confidence === 'number') out += `   - 可信度: ${fact.confidence}\n`;
-        if (typeof fact.importance === 'number') out += `   - 重要性: ${fact.importance}\n`;
-        out += '\n';
-    });
-
-    out += '</relevant_memory_facts>';
-    return out;
-}
-
-function buildMemoryRetrievalQuery(contact, userInput) {
-    const parts = [];
-    if (userInput != null) parts.push(String(userInput));
-    const msgs = contact && Array.isArray(contact.messages) ? contact.messages : [];
-    const tail = msgs.slice(-4);
-    for (let i = 0; i < tail.length; i++) {
-        const m = tail[i];
-        parts.push(m && m.content != null ? String(m.content) : '');
-    }
-    // 不再追加 contact.name，避免所有 subject=角色名 的 facts 被误判为相关
-    // if (contact && contact.name != null) parts.push(String(contact.name));
-    return parts.join('\n');
-}
-
-window.retrieveRelevantMemoryFacts = retrieveRelevantMemoryFacts;
-window.buildRelevantMemoryFactsBlock = buildRelevantMemoryFactsBlock;
-window.buildMemoryRetrievalQuery = buildMemoryRetrievalQuery;
-
-async function debugMemoryStore(contactId) {
-    const facts = await getMemoryFactsByContact(contactId, { activeOnly: false });
-    let episodes = [];
-    try {
-        if (contactId && isIndexedDBReady && db && db.objectStoreNames.contains('memoryEpisodes')) {
-            const transaction = db.transaction(['memoryEpisodes'], 'readonly');
-            const store = transaction.objectStore('memoryEpisodes');
-            const index = store.index('contactId');
-            const epList = await promisifyRequest(index.getAll(contactId));
-            await promisifyTransaction(transaction);
-            episodes = Array.isArray(epList) ? epList : [];
-        }
+        
+        return db;
+        
     } catch (error) {
-        console.error('[结构化记忆] debugMemoryStore 读取 episodes 失败:', error);
-    }
-    console.table(facts);
-    console.table(episodes);
-}
-
-window.debugMemoryStore = debugMemoryStore;
-
-/**
- * 从副模型返回文本中提取 <memory_ops> JSON；失败返回 null，不抛错。
- * @param {string} responseText
- * @returns {object|null}
- */
-function parseMemoryOps(responseText) {
-    if (!responseText || typeof responseText !== 'string') {
-        return null;
-    }
-    try {
-        const opsRegex = /<memory_ops>([\s\S]*?)<\/memory_ops>/;
-        const match = responseText.match(opsRegex);
-        if (!match) {
-            return null;
-        }
-        let jsonStr = match[1].trim();
-        jsonStr = jsonStr.replace(/^```json\s*/i, '');
-        jsonStr = jsonStr.replace(/^```\s*/, '');
-        jsonStr = jsonStr.replace(/```\s*$/, '');
-        jsonStr = jsonStr.trim();
-        const parsed = JSON.parse(jsonStr);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            return null;
-        }
-        return parsed;
-    } catch (e) {
-        console.warn('[结构化记忆] memory_ops 解析失败:', e);
-        return null;
+        console.error('🔥 [简化初始化] 数据库初始化失败:', error);
+        throw error;
     }
 }
 
-/**
- * 将 memory_ops 应用到 IndexedDB：失效旧事实、写入新事实。
- * @returns {Promise<{ addedFacts: Array, invalidatedFacts: Array }>}
- */
-async function applyMemoryOps(contact, memoryOps, sourceEpisodeId) {
-    const addedFacts = [];
-    const invalidatedFacts = [];
-    if (!contact || !contact.id || !memoryOps || typeof memoryOps !== 'object') {
-        return { addedFacts, invalidatedFacts };
-    }
-
-    const now = Date.now();
-    const entitiesBlock = Array.isArray(memoryOps.entities) ? memoryOps.entities : [];
-
-    try {
-        const activeFacts = await getMemoryFactsByContact(contact.id, { activeOnly: true });
-        const invalidatedIds = new Set();
-
-        for (const inv of memoryOps.facts_to_invalidate || []) {
-            if (!inv || typeof inv !== 'object') continue;
-            const subj = inv.subject != null ? String(inv.subject) : '';
-            const pred = inv.predicate != null ? String(inv.predicate) : '';
-            const reason = inv.reason != null ? String(inv.reason) : '';
-
-            for (const f of activeFacts) {
-                if (!f || invalidatedIds.has(f.id)) continue;
-                if (f.subject === subj && f.predicate === pred) {
-                    const updated = {
-                        ...f,
-                        status: 'inactive',
-                        validTo: now,
-                        updatedAt: now,
-                        metadata: { ...(f.metadata || {}), invalidationReason: reason }
-                    };
-                    const ok = await saveMemoryFact(updated);
-                    if (ok) {
-                        invalidatedIds.add(f.id);
-                        invalidatedFacts.push(updated);
-                    }
-                }
-            }
-        }
-
-        for (const item of memoryOps.facts_to_add || []) {
-            if (!item || typeof item !== 'object') continue;
-            const confRaw = item.confidence;
-            const impRaw = item.importance;
-            const conf = typeof confRaw === 'number' && !Number.isNaN(confRaw)
-                ? Math.min(1, Math.max(0, confRaw))
-                : 0.7;
-            const imp = typeof impRaw === 'number' && !Number.isNaN(impRaw)
-                ? Math.min(1, Math.max(0, impRaw))
-                : 0.5;
-
-            addedFacts.push({
-                id: generateMemoryId('fact'),
-                contactId: contact.id,
-                subject: item.subject != null ? String(item.subject) : '',
-                predicate: item.predicate != null ? String(item.predicate) : '',
-                object: item.object != null ? String(item.object) : '',
-                factText: item.factText != null ? String(item.factText) : '',
-                sourceEpisodeId,
-                confidence: conf,
-                importance: imp,
-                status: 'active',
-                createdAt: now,
-                updatedAt: now,
-                validFrom: now,
-                validTo: null,
-                metadata: {
-                    type: item.type,
-                    timeScope: item.timeScope,
-                    entities: entitiesBlock,
-                    source: 'memory_ops'
-                }
-            });
-        }
-
-        if (addedFacts.length > 0) {
-            await saveMemoryFacts(addedFacts);
-        }
-    } catch (e) {
-        console.error('[结构化记忆] applyMemoryOps 异常:', e);
-    }
-
-    return { addedFacts, invalidatedFacts };
-}
-
-window.parseMemoryOps = parseMemoryOps;
-window.applyMemoryOps = applyMemoryOps;
-
-/**
- * 将副模型输出的 memory_diff JSON 数组转为可入库的结构化事实（保守实现）。
- * @param {Array} diffArray
- * @param {object} contact
- * @param {string} sourceEpisodeId
- * @returns {Array<object>}
- */
-function convertMemoryDiffToFacts(diffArray, contact, sourceEpisodeId) {
-    if (!Array.isArray(diffArray) || !contact) {
-        return [];
-    }
-    const contactId = contact.id;
-    const subjectName = contact.name != null ? String(contact.name) : '';
-    const facts = [];
-    const now = Date.now();
-
-    diffArray.forEach(op => {
-        if (!op || typeof op !== 'object') return;
-        const section = op.section != null ? String(op.section) : '';
-
-        if (op.op === 'update') {
-            const key = op.key != null ? String(op.key) : '';
-            const valueStr = op.value != null ? String(op.value) : '';
-            const pred = section ? `${section}.${key}` : key;
-            facts.push({
-                id: generateMemoryId('fact'),
-                contactId,
-                subject: subjectName,
-                predicate: pred,
-                object: valueStr,
-                factText: `【${section}】${key}：${valueStr}`,
-                sourceEpisodeId,
-                confidence: 0.7,
-                importance: 0.5,
-                status: 'active',
-                createdAt: now,
-                updatedAt: now,
-                validFrom: now,
-                validTo: null,
-                metadata: {}
-            });
-        } else if (op.op === 'append') {
-            const line = op.line != null ? String(op.line).trim() : '';
-            if (!line) return;
-            facts.push({
-                id: generateMemoryId('fact'),
-                contactId,
-                subject: subjectName,
-                predicate: section,
-                object: line,
-                factText: line,
-                sourceEpisodeId,
-                confidence: 0.7,
-                importance: 0.5,
-                status: 'active',
-                createdAt: now,
-                updatedAt: now,
-                validFrom: now,
-                validTo: null,
-                metadata: {}
-            });
-        }
-    });
-
-    return facts;
-}
 
 // --- 论坛功能 ---
 
-function formatTime(timestamp) {
-    if (!timestamp) return '';
-
-    const now = new Date();
-    const postTime = new Date(timestamp);
-    const diff = now.getTime() - postTime.getTime();
-
-    const diffMinutes = Math.floor(diff / (1000 * 60));
-    const diffHours = Math.floor(diff / (1000 * 60 * 60));
-    const diffDays = Math.floor(diff / (1000 * 60 * 60 * 24));
-
-    if (diffDays < 1) {
-        if (diffHours < 1) {
-            return `${Math.max(1, diffMinutes)}分钟前`;
-        }
-        return `${diffHours}小时前`;
-    } else if (diffDays < 2) {
-        return '1天前';
-    } else {
-        const isSameYear = now.getFullYear() === postTime.getFullYear();
-        const month = (postTime.getMonth() + 1).toString().padStart(2, '0');
-        const day = postTime.getDate().toString().padStart(2, '0');
-        
-        if (isSameYear) {
-            const hours = postTime.getHours().toString().padStart(2, '0');
-            const minutes = postTime.getMinutes().toString().padStart(2, '0');
-            return `${month}-${day} ${hours}:${minutes}`;
-        } else {
-            return `${postTime.getFullYear()}-${month}-${day}`;
-        }
-    }
-}
+// formatTime function moved to utils/formatUtils.js
 
 // --- 页面导航 ---
-const pageIds = ['contactListPage', 'weiboPage', 'interactivePage', 'momentsPage', 'profilePage', 'chatPage', 'dataManagementPage', 'debugLogPage', 'walletPage', 'offlineModePage'];
-
-/**
- * 向互动场景 iframe 发送初始化数据
- */
-function sendDataToInteractiveFrame() {
-    const iframe = document.getElementById('interactiveFrame');
-    if (!iframe || !iframe.contentWindow) {
-        console.error("互动场景 iframe 未找到或未准备好。");
-        return;
-    }
-
-    if (!currentContact) {
-        showToast('请先选择一个聊天对象再进入互动场景');
-        // 可选：阻止页面切换
-        showPage('contactListPage'); 
-        return;
-    }
-
-    // 1. 打包所有需要的数据
-    const payload = {
-        type: 'INIT_DATA', // 消息类型，用于 iframe 识别
-        apiSettings: apiSettings, // 完整的 API 设置
-        character: {
-            name: currentContact.name,
-            persona: currentContact.personality,
-            voiceId: currentContact.voiceId || '', // 确保传递 voiceId
-            avatar: currentContact.avatar || '', // 传递头像URL或Base64
-        },
-        userPersona: {
-            name: userProfile.name,
-            persona: userProfile.personality
-        }
-    };
-
-    // 2. 发送消息
-    iframe.contentWindow.postMessage(payload, '*'); // '*' 适用于本地文件，生产环境应指定具体源
-    console.log("已向互动场景发送初始化数据:", payload);
-}
-
-/**
- * @description 将主应用的所有角色和用户数据批量同步到互动页面
- */
-function syncDataToInteractivePage() {
-    const iframe = document.getElementById('interactiveFrame');
-    if (!iframe || !iframe.contentWindow) {
-        showToast('互动页面未准备好，请稍后再试');
-        console.error("互动场景 iframe 未找到或未准备好。");
-        return;
-    }
-
-    // 1. 打包所有需要的数据
-    // 我们只筛选出私聊联系人作为可互动的角色
-    const charactersToSync = contacts.filter(c => c.type === 'private');
-    
-    const payload = {
-        type: 'BULK_DATA_SYNC', // 使用一个新的消息类型
-        characters: charactersToSync,
-        userProfile: userProfile,
-        apiSettings: apiSettings // 在这里将 apiSettings 一起发送过去
-    };
-
-    // 2. 发送消息
-    iframe.contentWindow.postMessage(payload, '*');
-    
-    // 3. 给用户反馈
-    showToast('数据已开始同步到互动页！');
-    console.log("已向互动场景发送批量同步数据:", payload);
-}
+const pageIds = ['contactListPage', 'weiboPage', 'momentsPage', 'profilePage', 'chatPage', 'dataManagementPage', 'debugLogPage', 'memoryManagementPage', 'userProfilePage', 'appearanceManagementPage', 'apiConfigManagementPage', 'interactivePage'];
 
 function showPage(pageIdToShow) {
+    // 异步包装函数，用于处理包含异步操作的页面显示
+    showPageAsync(pageIdToShow).catch(error => {
+        console.error('页面显示错误:', error);
+    });
+}
+
+async function showPageAsync(pageIdToShow) {
     // Hide all main pages and the chat page
     pageIds.forEach(pageId => {
         const page = document.getElementById(pageId);
@@ -2751,7 +1082,7 @@ function showPage(pageIdToShow) {
 
     // Update the active state of the bottom navigation buttons
     const navItems = document.querySelectorAll('.bottom-nav .nav-item');
-    const navMapping = ['contactListPage', 'weiboPage', 'interactivePage', 'momentsPage', 'profilePage'];
+    const navMapping = ['contactListPage', 'weiboPage', 'momentsPage', 'profilePage'];
     navItems.forEach((item, index) => {
         // This relies on the order in the HTML, which is correct.
         if (navMapping[index] === pageIdToShow) {
@@ -2761,93 +1092,81 @@ function showPage(pageIdToShow) {
         }
     });
 
+    // 兼容性适配：显式控制底部导航栏的显示/隐藏
+    // 为不支持 :has() 选择器的浏览器提供JavaScript备用方案
+    const bottomNav = document.querySelector('.bottom-nav');
+    if (bottomNav) {
+        if (pageIdToShow === 'chatPage') {
+            // 聊天页面时隐藏导航栏
+            bottomNav.style.display = 'none';
+            document.body.classList.add('chat-active');
+        } else {
+            // 其他页面时显示导航栏
+            bottomNav.style.display = 'flex';
+            document.body.classList.remove('chat-active');
+        }
+    }
+
     // --- Lazy Loading/Rendering ---
     // Render Weibo posts when the page is shown
     if (pageIdToShow === 'weiboPage') {
         renderAllWeiboPosts();
+    } else {
+        // 离开论坛页面时清理虚拟滚动监听器
+        const weiboPage = document.getElementById('weiboPage');
+        if (weiboPage) {
+            weiboPage.onscroll = null;
+        }
     }
     // Render Moments only on the first time it's opened
     if (pageIdToShow === 'momentsPage' && !isMomentsRendered) {
-        renderMomentsList();
+        await renderMomentsList();
         isMomentsRendered = true;
+    }
+    
+    // Load API Config Management page content
+    if (pageIdToShow === 'apiConfigManagementPage') {
+        await loadApiConfigManagementPage();
+    }
+    
+    // 更新朋友圈锁定指示器显示状态
+    if (window.momentsLockManager) {
+        window.momentsLockManager.updateLockIndicator();
     }
 
     if (pageIdToShow === 'dataManagementPage') {
         refreshDatabaseStats();
     }
-
-    // 当切换到互动页面时，不再自动发送数据
-    if (pageIdToShow === 'interactivePage') {
-        // sendDataToInteractiveFrame();  // 已移除自动发送数据
+    
+    // 切换到联系人列表时手动刷新时间显示
+    if (pageIdToShow === 'contactListPage') {
+        updateContactListTimes();
+    }
+    
+    // 切换到个人信息页面时更新版本号显示
+    if (pageIdToShow === 'profilePage') {
+        updateProfileVersion();
     }
 }
 
 /**
- * 刷新数据库统计信息
+ * 更新个人信息页面的版本号显示
  */
-async function refreshDatabaseStats() {
-    const statsContent = document.getElementById('databaseStatsContent');
-    const refreshBtn = document.querySelector('.refresh-stats-btn');
-    
-    if (!statsContent) return;
-    
+function updateProfileVersion() {
     try {
-        if (refreshBtn) {
-            refreshBtn.textContent = '刷新中...';
-            refreshBtn.disabled = true;
+        // 确保 EnvironmentConfig 已加载
+        if (typeof EnvironmentConfig === 'undefined') {
+            console.warn('EnvironmentConfig not loaded, using fallback version');
+            return;
         }
         
-        // 添加安全检查，确保DatabaseManager已初始化
-        if (!window.DatabaseManager) {
-            throw new Error('数据库管理器尚未初始化');
-        }
-        const result = await window.DatabaseManager.getStats();
-        
-        if (result.success) {
-            const stats = result.stats;
-            let statsHtml = '';
-            
-            const storeLabels = {
-                'contacts': '联系人/群聊',
-                'songs': '音乐文件', 
-                'apiSettings': 'API设置',
-                'emojis': '表情包',
-                'backgrounds': '聊天背景',
-                'userProfile': '用户资料',
-                'moments': '朋友圈',
-                'weiboPosts': '论坛帖子',
-                'hashtagCache': '话题缓存',
-                'customStyles': '自定义气泡样式'
-            };
-            
-            let totalRecords = 0;
-            Object.entries(stats).forEach(([storeName, count]) => {
-                const label = storeLabels[storeName] || storeName;
-                statsHtml += `<div style="display: flex; justify-content: space-between; margin-bottom: 3px;">
-                    <span>${label}:</span>
-                    <span><strong>${count}</strong> 条记录</span>
-                </div>`;
-                totalRecords += count;
-            });
-            
-            statsHtml += `<hr style="margin: 10px 0;"><div style="display: flex; justify-content: space-between; font-weight: bold;">
-                <span>总计:</span>
-                <span>${totalRecords} 条记录</span>
-            </div>`;
-            
-            statsContent.innerHTML = statsHtml;
-        } else {
-            statsContent.innerHTML = `<div style="color: #dc3545;">加载失败: ${result.error}</div>`;
+        const versionElement = document.getElementById('profileVersionText');
+        if (versionElement) {
+            const version = EnvironmentConfig.getVersion();
+            versionElement.textContent = version; // 不加 v 前缀，直接显示 commit hash
         }
     } catch (error) {
-        if (statsContent) {
-            statsContent.innerHTML = `<div style="color: #dc3545;">加载出错: ${error.message}</div>`;
-        }
-    } finally {
-        if (refreshBtn) {
-            refreshBtn.textContent = '刷新统计';
-            refreshBtn.disabled = false;
-        }
+        console.warn('Failed to update profile version:', error);
     }
 }
 
@@ -2863,10 +1182,30 @@ function showGeneratePostModal() {
         }
     });
     
+    // 重置关系选择
+    const relationSelect = document.getElementById('postGenRelations');
+    relationSelect.value = '';
+    handleRelationChange();
+    
+    // postUnsplashKey元素已从HTML中移除，不再恢复Unsplash API Key
     
     showModal('generatePostModal');
 }
 
+// 新增：处理关系选择变化
+function handleRelationChange() {
+    const relationSelect = document.getElementById('postGenRelations');
+    const customRelationInput = document.getElementById('postGenCustomRelation');
+    
+    if (relationSelect.value === 'custom') {
+        customRelationInput.parentElement.style.display = 'block'; // 显示父级 .form-group
+        customRelationInput.required = true;
+    } else {
+        customRelationInput.parentElement.style.display = 'none'; // 隐藏父级 .form-group
+        customRelationInput.required = false;
+        customRelationInput.value = '';
+    }
+}
 
 // 新增：处理角色选择变化，加载hashtag缓存
 function handleCharacterChange() {
@@ -2887,12 +1226,35 @@ function handleCharacterChange() {
 async function handleGeneratePost(event) {
     event.preventDefault();
     const contactId = document.getElementById('postGenCharacterSelect').value;
+    const relationSelect = document.getElementById('postGenRelations');
+    const customRelationInput = document.getElementById('postGenCustomRelation');
     const hashtagInput = document.getElementById('postGenHashtag');
     const count = document.getElementById('postGenCount').value;
+    // postUnsplashKey元素已从HTML中移除，从localStorage直接获取
+    const unsplashKey = localStorage.getItem('forumUnsplashApiKey') || '';
 
     if (!contactId) {
         showToast('请选择角色');
         return;
+    }
+
+    let relations;
+    let relationDescription;
+    
+    if (relationSelect.value === 'custom') {
+        if (!customRelationInput.value.trim()) {
+            showToast('请填写自定义关系');
+            return;
+        }
+        relations = customRelationInput.value.trim();
+        relationDescription = relations; // 自定义关系直接使用用户输入
+    } else {
+        if (!relationSelect.value) {
+            showToast('请选择关系类型');
+            return;
+        }
+        relations = relationSelect.value;
+        relationDescription = RELATION_PRESETS[relations];
     }
 
     const hashtag = hashtagInput.value.trim();
@@ -2904,19 +1266,21 @@ async function handleGeneratePost(event) {
     // 缓存hashtag
     hashtagCache[contactId] = hashtag;
     await saveDataToDB();
+    
+    // Unsplash API Key已从localStorage获取，无需重复保存
 
     closeModal('generatePostModal');
-    await generateWeiboPosts(contactId, hashtag, count);
+    await generateWeiboPosts(contactId, relations, relationDescription, hashtag, count, unsplashKey);
 }
 
 async function saveWeiboPost(postData) {
-    if (!isIndexedDBReady) {
+    if (!window.isIndexedDBReady) {
         console.error('IndexedDB not ready, cannot save post.');
         showToast('数据库错误，无法保存帖子');
         return;
     }
     try {
-        const transaction = db.transaction(['weiboPosts'], 'readwrite');
+        const transaction = window.db.transaction(['weiboPosts'], 'readwrite');
         const store = transaction.objectStore('weiboPosts');
         await promisifyRequest(store.add(postData));
         await promisifyTransaction(transaction);
@@ -2926,15 +1290,19 @@ async function saveWeiboPost(postData) {
     }
 }
 
-async function generateWeiboPosts(contactId, hashtag, count = 1) {
-    // 【核心修复】获取完整的角色数据
-    const fullContact = await getFullContactFromDB(contactId);
-
-    if (!fullContact) { // 使用 fullContact 进行判断
-        showToast('错误：找不到指定的聊天对象数据。');
-        return; 
+async function generateWeiboPosts(contactId, relations, relationDescription, hashtag, count = 1, unsplashKey = null) {
+    
+    const contact = contacts.find(c => c.id === contactId);
+    
+    if (!contact) {
+        console.error('未找到联系人，contactId:', contactId, '所有联系人:', contacts);
+        showToast('未找到指定的聊天对象');
+        return;
     }
+    
+    
     if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
+        console.error('API配置不完整:', apiSettings);
         showToast('请先在设置中配置API');
         return;
     }
@@ -2945,107 +1313,597 @@ async function generateWeiboPosts(contactId, hashtag, count = 1) {
     loadingIndicator.textContent = '正在生成论坛内容...';
     container.prepend(loadingIndicator);
 
+    console.log('正在构建系统提示词...');
+    const systemPrompt = await window.promptBuilder.buildWeiboPrompt(
+        contactId, 
+        relations, 
+        relationDescription,
+        hashtag,
+        count, 
+        contact, 
+        userProfile, 
+        contacts,
+        emojis
+    );
+
     try {
-        // ==================== VVVVVV 在这里粘贴下面的新代码 VVVVVV ====================
+        const payload = {
+            model: apiSettings.model,
+            messages: [{ role: 'user', content: systemPrompt }],
+            response_format: { type: "json_object" },
+            temperature: 0.7
+        };
 
-        // 1. 创建一个 fullContact 的临时副本，以避免修改原始数据
-        const limitedContact = { ...fullContact }; 
-        
-        // 2. 在副本中，将消息数组截取为最近的15条
-        limitedContact.messages = (fullContact.messages || []).slice(-15);
-
-        // ==================== ^^^^^^ 粘贴到这里结束 ^^^^^^ ====================
-
-        // 【新流程 1】: 构建只请求"数据"的指令
-        const systemPrompt = window.promptBuilder.buildWeiboPrompt(
-            contactId,
-            hashtag,
-            count,
-            limitedContact, // <--- 修改这里！使用我们刚刚创建的临时副本
-            userProfile,
-            contacts,
-            emojis,
-            fullContact.memoryTableContent 
-        );
-
-        // 【新流程 2】: 调用AI，获取纯数据JSON
-        const data = await window.apiService.callOpenAIAPI(
-            apiSettings.url,
-            apiSettings.key,
-            apiSettings.model,
-            [{ role: 'user', content: systemPrompt }],
-            { 
-                response_format: { type: "json_object" },
-                temperature: 0.7 
+        const apiUrl = `${apiSettings.url}/chat/completions`;
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiSettings.key}`
             },
-            (apiSettings.timeout || 60) * 1000
-        );
+            body: JSON.stringify(payload)
+        });
 
-        let jsonText = data.choices[0].message.content;
+        console.log('收到API响应:', {
+            status: response.status,
+            statusText: response.statusText,
+            ok: response.ok,
+            headers: Object.fromEntries(response.headers.entries())
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('API请求失败，错误详情:', {
+                status: response.status,
+                statusText: response.statusText,
+                errorText: errorText
+            });
+            throw new Error(`API请求失败: ${response.status} - ${errorText}`);
+        }
+
+        const data = await response.json();
+        console.log('API完整返回:', JSON.stringify(data, null, 2));
         
-        if (!jsonText) {
+        let rawText = data.choices[0].message.content;
+        
+        if (!rawText) {
+            console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(data, null, 2));
             throw new Error("AI未返回有效内容");
         }
         
-        // 自动清理AI可能返回的多余代码块
-        jsonText = jsonText.trim();
-        if (jsonText.startsWith('```json')) {
-            jsonText = jsonText.substring(7).trim(); // 移除 ```json 和可能的前导空格
-        }
-        if (jsonText.endsWith('```')) {
-            jsonText = jsonText.slice(0, -3).trim(); // 移除末尾的 ``` 和可能的尾随空格
+        // 使用统一的JSON提取函数清理markdown语法
+        let jsonText;
+        try {
+            jsonText = window.apiService.extractJSON(rawText);
+        } catch (extractError) {
+            console.error('ERROR: JSON提取失败 - API完整返回:', rawText);
+            console.error('ERROR: JSON提取失败 - 错误详情:', extractError);
+            throw new Error(`JSON提取失败: ${extractError.message}`);
         }
 
-        const aiGeneratedData = JSON.parse(jsonText);
+        // 解析JSON
+        let weiboData;
+        try {
+            weiboData = JSON.parse(jsonText);
+        } catch (parseError) {
+            console.error('ERROR: JSON解析失败 - API完整返回:', rawText);
+            console.error('ERROR: JSON解析失败 - 尝试解析的文本:', jsonText);
+            console.error('ERROR: JSON解析失败 - 错误详情:', parseError);
+            throw new Error(`JSON解析失败: ${parseError.message}`);
+        }
 
-        // 【新流程 3】: 将AI数据存入我们的应用结构中
-        // 注意：这里的结构与之前类似，是为了保持数据存储的兼容性
-        const postCreatedAt = new Date();
+        // --- 时间戳注入 ---
+        // 注入时间戳
+        const now = Date.now();
+        // 主楼时间设为2-5分钟前
+        const postCreatedAt = new Date(now - (Math.random() * 3 + 2) * 60 * 1000);
+        let lastCommentTime = postCreatedAt.getTime();
+        
+
+        if (weiboData.posts && Array.isArray(weiboData.posts)) {
+            weiboData.posts.forEach((post, index) => {
+                post.timestamp = postCreatedAt.toISOString(); // 给主楼加时间戳
+                
+                if (post.comments && Array.isArray(post.comments)) {
+                    post.comments.forEach((comment, commentIndex) => {
+                        // 回复时间在主楼和现在之间，且比上一条晚一点
+                        const newCommentTimestamp = lastCommentTime + (Math.random() * 2 * 60 * 1000); // 0-2分钟后
+                        lastCommentTime = newCommentTimestamp;
+                        comment.timestamp = new Date(Math.min(newCommentTimestamp, now)).toISOString(); // 不超过当前时间
+                    });
+                }
+            });
+        } else {
+            console.error('weiboData.posts不是数组或不存在:', weiboData);
+        }
+        // --- 时间戳注入结束 ---
+        
+        // --- 图片生成逻辑 ---
+        if (unsplashKey && weiboData.posts && Array.isArray(weiboData.posts)) {
+            try {
+                for (const post of weiboData.posts) {
+                    if (post.image_description && post.image_description.trim()) {
+                        try {
+                            const imageUrl = await fetchMatchingImageForPublish(post.image_description, unsplashKey);
+                            if (imageUrl) {
+                                // 将图片描述替换为实际图片HTML
+                                post.actual_image_url = imageUrl;
+                                // 保留原始描述用于备份
+                                post.original_image_description = post.image_description;
+                                post.image_description = `<img src="${imageUrl}" alt="${post.image_description}" style="width: 100%; max-width: 300px; border-radius: 8px;">`;
+                            }
+                        } catch (imageError) {
+                            console.warn(`为帖子生成图片失败: ${imageError.message}`);
+                            // 图片生成失败时保持原始文字描述
+                        }
+                    }
+                }
+            } catch (error) {
+                console.warn('批量图片生成过程中出现错误:', error);
+            }
+        }
+        // --- 图片生成结束 ---
+        
         const newPost = {
             id: Date.now(),
             contactId: contactId,
+            relations: relations,
+            relationDescription: relationDescription,
             hashtag: hashtag,
-            createdAt: postCreatedAt.toISOString(),
-            // 核心变化：我们将AI的单帖数据存入，并自己构建外层结构
-            data: {
-                posts: [{
-                    author_type: 'Char', // 发帖人固定为角色
-                    timestamp: postCreatedAt.toISOString(),
-                    ...aiGeneratedData // 使用扩展运算符(...)将AI生成的所有字段合并进来
-                }]
-            }
+            data: weiboData,
+            createdAt: postCreatedAt.toISOString()
         };
-        
-        // 【新流程 4】: 保存并渲染
+
+        console.log('准备保存新帖子:', {
+            id: newPost.id,
+            contactId: newPost.contactId,
+            relations: newPost.relations,
+            hashtag: newPost.hashtag,
+            createdAt: newPost.createdAt,
+            dataStructure: {
+                hasWeiboPosts: !!newPost.data.posts,
+                postsCount: newPost.data.posts ? newPost.data.posts.length : 0
+            }
+        });
+
+        console.log('保存帖子到数据库...');
         await saveWeiboPost(newPost);
+        console.log('帖子保存成功，添加到内存数组...');
         weiboPosts.push(newPost); // Update in-memory array
-        renderAllWeiboPosts(); // renderAllWeiboPosts 内部的 renderSingleWeiboPost 会使用新逻辑
+        console.log('当前内存中的帖子数量:', weiboPosts.length);
+        
+        console.log('重新渲染所有帖子...');
+        renderAllWeiboPosts();
+        console.log('=== 论坛帖子生成完成 ===');
         showToast('帖子已刷新！');
 
     } catch (error) {
-        console.error('生成论坛失败:', error);
-        showToast('生成论坛失败: ' + error.message);
+        console.error('=== 生成论坛失败 ===');
+        console.error('错误类型:', error.name);
+        console.error('错误消息:', error.message);
+        console.error('完整错误对象:', error);
+        showApiError(error);
     } finally {
         loadingIndicator.remove();
     }
 }
 
 
-function renderAllWeiboPosts() {
-    const container = document.getElementById('weiboContainer');
-    container.innerHTML = '';
-
+// 扁平化帖子数据，每个帖子包含原始信息和位置信息
+function flattenPosts() {
     if (!weiboPosts || weiboPosts.length === 0) {
-        container.innerHTML = '<div class="loading-text">还没有任何帖子，点击右上角“+”来生成吧！</div>';
+        allPosts = [];
         return;
     }
 
-    // Sort posts by creation date, newest first
     const sortedPosts = weiboPosts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
+    allPosts = [];
+    
     sortedPosts.forEach(storedPost => {
-        renderSingleWeiboPost(storedPost);
+        if (storedPost.data?.posts) {
+            storedPost.data.posts.forEach((post, postIndex) => {
+                allPosts.push({
+                    storedPost,
+                    post,
+                    postIndex,
+                    height: ESTIMATED_POST_HEIGHT,
+                    rendered: false
+                });
+            });
+        }
     });
+}
+
+// 计算虚拟滚动的渲染范围
+function calculateRenderRange(scrollTop) {
+    const containerHeight = document.getElementById('weiboContainer').clientHeight;
+    
+    // 使用实际高度计算可见区域
+    let currentHeight = 0;
+    let visibleStartIndex = 0;
+    let visibleEndIndex = allPosts.length;
+    
+    // 找到可见区域开始的索引
+    for (let i = 0; i < allPosts.length; i++) {
+        const postHeight = allPosts[i].height || ESTIMATED_POST_HEIGHT;
+        if (currentHeight + postHeight > scrollTop) {
+            visibleStartIndex = i;
+            break;
+        }
+        currentHeight += postHeight;
+    }
+    
+    // 找到可见区域结束的索引
+    const viewportBottom = scrollTop + containerHeight;
+    let heightFromStart = currentHeight; // 从可见开始位置的累积高度
+    
+    for (let i = visibleStartIndex; i < allPosts.length; i++) {
+        const postHeight = allPosts[i].height || ESTIMATED_POST_HEIGHT;
+        heightFromStart += postHeight;
+        if (heightFromStart > viewportBottom) {
+            visibleEndIndex = i + 1; // 包含当前项目
+            break;
+        }
+    }
+    
+    // 上下各预留4条帖子，提供适中的缓冲区
+    const startIndex = Math.max(0, visibleStartIndex - 4);
+    const endIndex = Math.min(allPosts.length, visibleEndIndex + 4);
+    
+    // 确保至少渲染一些帖子
+    if (endIndex <= startIndex) {
+        return { 
+            startIndex: Math.max(0, Math.min(visibleStartIndex, allPosts.length - VIRTUAL_WINDOW_SIZE)), 
+            endIndex: Math.min(allPosts.length, Math.max(visibleStartIndex + VIRTUAL_WINDOW_SIZE, VIRTUAL_WINDOW_SIZE))
+        };
+    }
+    
+    return { startIndex, endIndex };
+}
+
+// 数据一致性检查和修复函数
+async function checkAndRepairDataConsistency() {
+    if (!window.isIndexedDBReady || !window.db) {
+        return false;
+    }
+    
+    try {
+        // 从数据库重新加载所有帖子
+        const transaction = window.db.transaction(['weiboPosts'], 'readonly');
+        const store = transaction.objectStore('weiboPosts');
+        const allDbPosts = await promisifyRequest(store.getAll());
+        
+        // 检查内存中的帖子是否与数据库一致
+        const memoryPostIds = new Set(weiboPosts.map(p => p.id));
+        const dbPostIds = new Set(allDbPosts.map(p => p.id));
+        
+        // 找出不一致的数据
+        const missingInMemory = allDbPosts.filter(p => !memoryPostIds.has(p.id));
+        const extraInMemory = weiboPosts.filter(p => !dbPostIds.has(p.id));
+        
+        if (missingInMemory.length > 0 || extraInMemory.length > 0) {
+            console.warn(`数据不一致: 内存缺少 ${missingInMemory.length} 个帖子，内存多余 ${extraInMemory.length} 个帖子`);
+            
+            // 使用数据库数据作为准确来源
+            weiboPosts = allDbPosts;
+            console.log('已从数据库恢复数据一致性');
+            return true;
+        }
+        
+        return false;
+    } catch (error) {
+        console.error('数据一致性检查失败:', error);
+        return false;
+    }
+}
+
+function renderAllWeiboPosts(isInitialLoad = true) {
+    const container = document.getElementById('weiboContainer');
+    
+    if (!weiboPosts || weiboPosts.length === 0) {
+        container.innerHTML = '<div class="loading-text">还没有任何帖子，点击右上角"+"来生成吧！</div>';
+        allPosts = [];
+        return;
+    }
+
+    // 扁平化帖子数据
+    flattenPosts();
+    
+    // 如果帖子数量较少，直接渲染全部而不使用虚拟滚动
+    if (allPosts.length <= 15) {
+        renderAllPostsDirectly();
+        return;
+    }
+    
+    if (isInitialLoad) {
+        currentStartIndex = 0;
+        // 初始时渲染稍多一些内容，避免空白但不会太多
+        const initialRenderCount = Math.min(allPosts.length, Math.max(VIRTUAL_WINDOW_SIZE, 12));
+        currentEndIndex = initialRenderCount;
+        renderVirtualPosts();
+    }
+
+    // 设置虚拟滚动监听器
+    setupVirtualScrollListener();
+}
+
+// 直接渲染所有帖子（用于帖子数量较少的情况）
+function renderAllPostsDirectly() {
+    const container = document.getElementById('weiboContainer');
+    container.innerHTML = '';
+    
+    // 清理虚拟滚动监听器
+    const scrollContainer = document.getElementById('weiboContainer');
+    if (scrollContainer) {
+        scrollContainer.onscroll = null;
+    }
+    
+    // 渲染所有帖子
+    allPosts.forEach((postData, index) => {
+        const postElement = renderSingleVirtualPost(postData, index);
+        if (postElement) {
+            container.appendChild(postElement);
+        }
+    });
+}
+
+// 虚拟滚动渲染函数
+function renderVirtualPosts() {
+    const container = document.getElementById('weiboContainer');
+    
+    // 创建虚拟容器，用于保持总高度
+    container.innerHTML = '';
+    
+    // 计算顶部占位符高度（使用实际高度）
+    let topSpacerHeight = 0;
+    for (let i = 0; i < currentStartIndex; i++) {
+        topSpacerHeight += allPosts[i] ? (allPosts[i].height || ESTIMATED_POST_HEIGHT) : ESTIMATED_POST_HEIGHT;
+    }
+    
+    // 添加顶部占位符
+    const topSpacer = document.createElement('div');
+    topSpacer.style.height = `${topSpacerHeight}px`;
+    topSpacer.className = 'virtual-spacer-top';
+    container.appendChild(topSpacer);
+    
+    // 渲染当前窗口内的帖子
+    const renderedPosts = [];
+    for (let i = currentStartIndex; i < currentEndIndex; i++) {
+        if (i >= allPosts.length) break;
+        const postElement = renderSingleVirtualPost(allPosts[i], i);
+        if (postElement) {
+            renderedPosts.push(postElement);
+            // 关键修复：将帖子元素添加到容器中！
+            container.appendChild(postElement);
+        }
+    }
+    
+    // 计算底部占位符高度（使用实际高度）
+    let bottomSpacerHeight = 0;
+    for (let i = currentEndIndex; i < allPosts.length; i++) {
+        bottomSpacerHeight += allPosts[i] ? (allPosts[i].height || ESTIMATED_POST_HEIGHT) : ESTIMATED_POST_HEIGHT;
+    }
+    
+    // 添加底部占位符
+    const bottomSpacer = document.createElement('div');
+    bottomSpacer.style.height = `${Math.max(0, bottomSpacerHeight)}px`;
+    bottomSpacer.className = 'virtual-spacer-bottom';
+    container.appendChild(bottomSpacer);
+    
+    const containerWidth = container.offsetWidth;
+    
+    // 强制重排以修复布局问题
+    container.offsetHeight; // 触发重排
+    
+    // 测量实际高度并更新估算值（延迟执行避免布局抖动）
+    setTimeout(() => {
+        updatePostHeights(renderedPosts);
+    }, 50);
+}
+
+// 渲染单个虚拟帖子
+function renderSingleVirtualPost(postData, index) {
+    const container = document.getElementById('weiboContainer');
+    const { storedPost, post, postIndex } = postData;
+    
+    const contact = contacts.find(c => c.id === storedPost.contactId);
+    if (storedPost.contactId && !contact) return null;
+    
+    const postAuthorContact = post.author_type === 'User' ? userProfile : contact;
+    const postAuthorNickname = post.author_type === 'User' ? userProfile.name : (contact ? contact.name : '未知用户');
+    const postAuthorAvatar = postAuthorContact ? postAuthorContact.avatar : '';
+    const otherPartyName = post.author_type === 'User' ? (contact ? contact.name : '') : userProfile.name;
+
+    const postElement = document.createElement('div');
+    postElement.className = 'post';
+    // 使用与常规渲染一致的ID格式：weibo-post-{storedPostId}-{postIndex}
+    const postHtmlId = `weibo-post-${storedPost.id}-${postIndex}`;
+    postElement.id = postHtmlId;
+    postElement.setAttribute('data-index', index);
+
+    // 使用固定的随机数，避免每次渲染都重新生成
+    const savedRandomRetweet = postData.randomRetweet || (postData.randomRetweet = Math.floor(Math.random() * 500));
+    const savedRandomLike = postData.randomLike || (postData.randomLike = Math.floor(Math.random() * 5000));
+
+    postElement.innerHTML = `
+        <div class="post-header">
+            <div class="avatar">
+                ${postAuthorAvatar ? `<img src="${postAuthorAvatar}" alt="${postAuthorNickname[0]}">` : postAuthorNickname[0]}
+            </div>
+            <div class="post-info">
+                <div class="user-name">
+                    ${postAuthorNickname}
+                    <span class="vip-badge">${post.author_type === 'User' ? '会员' : '蓝星'}</span>
+                </div>
+                <div class="post-time">${formatTime(post.timestamp)}</div>
+                <div class="post-source">来自 ${storedPost.relations} 研究所</div>
+            </div>
+            <div class="post-menu" onclick="toggleWeiboMenu(event, '${storedPost.id}', ${postIndex})">
+                ...
+                <div class="post-menu-dropdown" id="weibo-menu-${storedPost.id}-${postIndex}">
+                    <div class="menu-item" onclick="regeneratePostImage('${storedPost.id}', ${postIndex})">重新生成图片</div>
+                    <div class="menu-item" onclick="removePostImage('${storedPost.id}', ${postIndex})">删除图片恢复文字</div>
+                    <div class="menu-item" onclick="regeneratePostComments('${storedPost.id}', ${postIndex})">重新生成评论</div>
+                    <div class="menu-item" onclick="deleteWeiboPost('${storedPost.id}', ${postIndex})">删除</div>
+                </div>
+            </div>
+        </div>
+        <div class="post-content">
+            <a href="#" class="hashtag">#${storedPost.hashtag || storedPost.data.relation_tag}#</a>
+            ${post.post_content}
+            ${otherPartyName ? `<a href="#" class="mention">@${otherPartyName}</a>` : ''}
+        </div>
+        <div class="post-image-desc">
+            ${post.image_description}
+        </div>
+        <div class="post-actions">
+            <a href="#" class="action-btn-weibo">
+                <span class="action-icon">🔄</span>
+                <span>${savedRandomRetweet}</span>
+            </a>
+            <a href="#" class="action-btn-weibo" onclick="showReplyBox('${postHtmlId}').catch(console.error)">
+                <span class="action-icon">💬</span>
+                <span>${post.comments ? post.comments.length : 0}</span>
+            </a>
+            <a href="#" class="action-btn-weibo">
+                <span class="action-icon">👍</span>
+                <span>${savedRandomLike}</span>
+            </a>
+        </div>
+        <div class="comments-section"></div>
+    `;
+
+    container.appendChild(postElement);
+    
+    // 调试：检查帖子宽度
+    setTimeout(() => {
+        const postWidth = postElement.offsetWidth;
+        if (postWidth < 500) { // 如果宽度异常小
+        }
+    }, 10);
+    
+    // 渲染评论
+    const commentsSection = postElement.querySelector('.comments-section');
+    
+    // 添加评论区点击事件（与常规渲染保持一致）
+    commentsSection.onclick = () => showReplyBox(postHtmlId).catch(console.error);
+    
+    if (post.comments && post.comments.length > 0) {
+        post.comments.forEach(comment => {
+            const commenterType = comment.commenter_type ? ` (${comment.commenter_type})` : '';
+            
+            const commentDiv = document.createElement('div');
+            commentDiv.className = 'comment';
+            
+            commentDiv.innerHTML = `
+                <span class="comment-user">${comment.commenter_name}${commenterType}:</span>
+                <span class="comment-content">${comment.comment_content}</span>
+                <span class="comment-time">${formatTime(comment.timestamp)}</span>
+            `;
+
+            commentDiv.addEventListener('click', (event) => {
+                event.stopPropagation();
+                replyToComment(comment.commenter_name, postHtmlId).catch(console.error);
+            });
+            
+            commentsSection.appendChild(commentDiv);
+        });
+    }
+    
+    return postElement;
+}
+
+// 测量并更新帖子的实际高度
+function updatePostHeights(renderedPosts) {
+    if (!renderedPosts || renderedPosts.length === 0) return;
+    
+    let totalMeasuredHeight = 0;
+    let measuredCount = 0;
+    
+    renderedPosts.forEach(postElement => {
+        if (postElement && postElement.offsetHeight > 0) {
+            const index = parseInt(postElement.getAttribute('data-index'));
+            const actualHeight = postElement.offsetHeight + 8; // 包括margin-bottom
+            
+            if (allPosts[index]) {
+                allPosts[index].height = actualHeight;
+                totalMeasuredHeight += actualHeight;
+                measuredCount++;
+            }
+        }
+    });
+    
+    // 更新全局估算高度
+    if (measuredCount > 0) {
+        const newEstimatedHeight = Math.round(totalMeasuredHeight / measuredCount);
+        if (Math.abs(newEstimatedHeight - ESTIMATED_POST_HEIGHT) > 50) {
+            // 只有当差异较大时才更新全局估算值
+        }
+    }
+}
+
+// 虚拟滚动监听器
+function setupVirtualScrollListener() {
+    // 修复：使用实际的滚动容器 weiboContainer 而不是 weiboPage
+    const scrollContainer = document.getElementById('weiboContainer');
+    if (!scrollContainer) {
+        console.error('找不到滚动容器 weiboContainer');
+        return;
+    }
+
+    // 移除旧的监听器
+    scrollContainer.onscroll = null;
+    
+    
+    let ticking = false;
+    let lastScrollTime = 0;
+    
+    scrollContainer.onscroll = () => {
+        const now = performance.now();
+        if (now - lastScrollTime < 16) return; // 限制到60fps
+        lastScrollTime = now;
+        
+        if (!ticking) {
+            requestAnimationFrame(() => {
+                handleVirtualScroll();
+                ticking = false;
+            });
+            ticking = true;
+        }
+    };
+}
+
+function handleVirtualScroll() {
+    const scrollContainer = document.getElementById('weiboContainer');
+    const scrollTop = scrollContainer.scrollTop;
+    
+    
+    // 计算新的渲染范围
+    const { startIndex, endIndex } = calculateRenderRange(scrollTop);
+    
+    // 检查是否需要更新渲染范围（减少阈值以提供更好的响应）
+    const threshold = 1; // 索引变化阈值
+    const startIndexChanged = Math.abs(startIndex - currentStartIndex) >= threshold;
+    const endIndexChanged = Math.abs(endIndex - currentEndIndex) >= threshold;
+    
+    if (startIndexChanged || endIndexChanged) {
+        currentStartIndex = startIndex;
+        currentEndIndex = endIndex;
+        
+        renderVirtualPosts();
+    }
+}
+
+// 加载更多帖子数据的函数
+async function loadMorePostData() {
+    if (isLoadingMorePosts) return;
+    isLoadingMorePosts = true;
+    
+    // 这里可以实现加载更多帖子数据的逻辑
+    // 目前只是简单的延时，实际应用中可以调用API获取更多帖子
+    setTimeout(() => {
+        isLoadingMorePosts = false;
+    }, 1000);
 }
 
 function renderSingleWeiboPost(storedPost) {
@@ -3063,53 +1921,101 @@ function renderSingleWeiboPost(storedPost) {
     }
 
     data.posts.forEach((post, index) => {
-        // 准备填充模板所需的所有数据
         const postAuthorContact = post.author_type === 'User' ? userProfile : contact;
         const postAuthorNickname = post.author_type === 'User' ? userProfile.name : (contact ? contact.name : '未知用户');
-        const postAuthorAvatar = postAuthorContact ? (postAuthorContact.avatar ? `<img src="${postAuthorContact.avatar}" alt="${postAuthorNickname[0]}">` : postAuthorNickname[0]) : postAuthorNickname[0];
-        const mentionHtml = post.author_type === 'User' ? '' : `<a href="#" class="mention">@${userProfile.name}</a>`;
-        
-        // 生成评论区的HTML
-        let commentsHtml = '';
-        if (post.comments && Array.isArray(post.comments)) {
-            commentsHtml = post.comments.map(comment => {
-                const commenterType = comment.commenter_type ? ` (${comment.commenter_type})` : '';
-                const commentTime = comment.timestamp ? formatTime(comment.timestamp) : '';
-                return `<div class="comment" onclick="replyToComment('${comment.commenter_name}', 'weibo-post-${storedPost.id}-${index}')">
-                    <span class="comment-user">${comment.commenter_name}${commenterType}:</span>
-                    <span class="comment-content">${comment.comment_content}</span>
-                    <span class="comment-time">${commentTime}</span>
-                </div>`;
-            }).join('');
-        }
+        const postAuthorAvatar = postAuthorContact ? postAuthorContact.avatar : '';
+        // 修复otherPartyName逻辑，对于用户自己发的帖子，otherPartyName可以是空或者话题标签
+        const otherPartyName = post.author_type === 'User' ? (contact ? contact.name : '') : userProfile.name;
 
-        // 【核心】: 使用模板和数据进行填充
-        let finalHtml = postTemplate // 使用我们定义的模板
-            .replace(/\${postId}/g, `weibo-post-${storedPost.id}-${index}`)
-            .replace(/\${postAuthorAvatar}/g, postAuthorAvatar)
-            .replace(/\${postAuthorNickname}/g, postAuthorNickname)
-            .replace(/\${badgeText}/g, post.author_type === 'User' ? '会员' : '蓝星')
-            .replace(/\${postTime}/g, formatTime(post.timestamp))
-            .replace(/\${sourceTopic}/g, post.source_topic || storedPost.hashtag) // 使用AI生成的研究社名称
-            .replace(/\${storedPostId}/g, storedPost.id)
-            .replace(/\${postIndex}/g, index)
-            .replace(/\${hashtag}/g, storedPost.hashtag)
-            .replace(/\${postContent}/g, post.post_content)
-            .replace(/\${mentionHtml}/g, mentionHtml)
-            .replace(/\${imageDescription}/g, post.image_description || '')
-            .replace(/\${randomRepostCount}/g, Math.floor(Math.random() * 500))
-            .replace(/\${commentCount}/g, post.comments ? post.comments.length : 0)
-            .replace(/\${randomLikeCount}/g, Math.floor(Math.random() * 5000))
-            .replace(/\${commentsHtml}/g, commentsHtml);
+        const postElement = document.createElement('div');
+        postElement.className = 'post';
+        const postHtmlId = `weibo-post-${storedPost.id}-${index}`;
+        postElement.id = postHtmlId;
+
+        // Set the main structure of the post
+        postElement.innerHTML = `
+            <div class="post-header">
+                <div class="avatar">
+                    ${postAuthorAvatar ? `<img src="${postAuthorAvatar}" alt="${postAuthorNickname[0]}">` : postAuthorNickname[0]}
+                </div>
+                <div class="post-info">
+                    <div class="user-name">
+                        ${postAuthorNickname}
+                        <span class="vip-badge">${post.author_type === 'User' ? '会员' : '蓝星'}</span>
+                    </div>
+                    <div class="post-time">${formatTime(post.timestamp)}</div>
+                    <div class="post-source">来自 ${storedPost.relations} 研究所</div>
+                </div>
+                <div class="post-menu" onclick="toggleWeiboMenu(event, '${storedPost.id}', ${index})">
+                    ...
+                    <div class="post-menu-dropdown" id="weibo-menu-${storedPost.id}-${index}">
+                        <div class="menu-item" onclick="regeneratePostImage('${storedPost.id}', ${index})">重新生成图片</div>
+                        <div class="menu-item" onclick="removePostImage('${storedPost.id}', ${index})">删除图片恢复文字</div>
+                        <div class="menu-item" onclick="regeneratePostComments('${storedPost.id}', ${index})">重新生成评论</div>
+                        <div class="menu-item" onclick="deleteWeiboPost('${storedPost.id}', ${index})">删除</div>
+                    </div>
+                </div>
+            </div>
+            <div class="post-content">
+                <a href="#" class="hashtag">#${storedPost.hashtag || data.relation_tag}#</a>
+                ${post.post_content}
+                ${otherPartyName ? `<a href="#" class="mention">@${otherPartyName}</a>` : ''}
+            </div>
+            <div class="post-image-desc">
+                ${post.image_description}
+            </div>
+            <div class="post-actions">
+                <a href="#" class="action-btn-weibo">
+                    <span class="action-icon">🔄</span>
+                    <span>${Math.floor(Math.random() * 500)}</span>
+                </a>
+                <a href="#" class="action-btn-weibo" onclick="showReplyBox('${postHtmlId}').catch(console.error)">
+                    <span class="action-icon">💬</span>
+                    <span>${post.comments ? post.comments.length : 0}</span>
+                </a>
+                <a href="#" class="action-btn-weibo">
+                    <span class="action-icon">👍</span>
+                    <span>${Math.floor(Math.random() * 5000)}</span>
+                </a>
+            </div>
+            <div class="comments-section"></div>
+        `;
+
+        // Programmatically create and append comments
+        const commentsSection = postElement.querySelector('.comments-section');
+        if (commentsSection) {
+            commentsSection.onclick = () => showReplyBox(postHtmlId).catch(console.error);
+
+            if (post.comments && Array.isArray(post.comments)) {
+                post.comments.forEach(comment => {
+                    const commenterType = comment.commenter_type ? ` (${comment.commenter_type})` : '';
+                    
+                    const commentDiv = document.createElement('div');
+                    commentDiv.className = 'comment';
+                    
+                    commentDiv.innerHTML = `
+                        <span class="comment-user">${comment.commenter_name}${commenterType}:</span>
+                        <span class="comment-content">${comment.comment_content}</span>
+                        <span class="comment-time">${formatTime(comment.timestamp)}</span>
+                    `;
+
+                    commentDiv.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        replyToComment(comment.commenter_name, postHtmlId).catch(console.error);
+                    });
+
+                    commentsSection.appendChild(commentDiv);
+                });
+            }
+        }
         
-        // 将填充好的HTML添加到容器中
-        container.innerHTML += finalHtml;
+        container.appendChild(postElement);
     });
 }
 
-function replyToComment(commenterName, postHtmlId) {
+async function replyToComment(commenterName, postHtmlId) {
     // First, ensure the reply box is visible for the post.
-    showReplyBox(postHtmlId);
+    await showReplyBox(postHtmlId);
 
     // Now, find the reply box and its textarea.
     const postElement = document.getElementById(postHtmlId);
@@ -3132,9 +2038,26 @@ function replyToComment(commenterName, postHtmlId) {
     replyInput.setSelectionRange(replyInput.value.length, replyInput.value.length);
 }
 
-function showReplyBox(postHtmlId) {
+async function showReplyBox(postHtmlId) {
     const postElement = document.getElementById(postHtmlId);
-    if (!postElement) return;
+    if (!postElement) {
+        console.warn(`找不到帖子元素: ${postHtmlId}`);
+        return;
+    }
+    
+    // 在显示回复框前检查数据一致性
+    const storedPostId = parseInt(postHtmlId.split('-')[2], 10);
+    const storedPost = weiboPosts.find(p => p.id === storedPostId);
+    if (!storedPost) {
+        console.warn(`数据不一致，帖子ID ${storedPostId} 不存在，尝试修复...`);
+        const repaired = await checkAndRepairDataConsistency();
+        if (repaired) {
+            // 数据修复后重新渲染页面
+            renderAllWeiboPosts();
+            showToast('数据已同步，请重新点击回复');
+            return;
+        }
+    }
 
     let replyBox = postElement.querySelector('.reply-box');
     if (replyBox) {
@@ -3172,11 +2095,70 @@ function showReplyBox(postHtmlId) {
         // --- Find the target post ---
         const storedPostId = parseInt(postHtmlId.split('-')[2], 10);
         const postIndex = parseInt(postHtmlId.split('-')[3], 10);
-        const storedPost = weiboPosts.find(p => p.id === storedPostId);
+        let storedPost = weiboPosts.find(p => p.id === storedPostId);
+        
+        // 容错机制：如果找不到帖子，尝试从数据库重新加载
         if (!storedPost) {
-            showToast('错误：找不到原始帖子');
+            console.warn(`找不到帖子ID ${storedPostId}，尝试从数据库重新加载...`);
+            
+            // 首先尝试按不同类型查找
+            let foundByString = weiboPosts.find(p => p.id.toString() === storedPostId.toString());
+            if (foundByString) {
+                storedPost = foundByString;
+            } else {
+                // 尝试从数据库重新加载
+                try {
+                    if (window.isIndexedDBReady && window.db) {
+                        const transaction = window.db.transaction(['weiboPosts'], 'readonly');
+                        const store = transaction.objectStore('weiboPosts');
+                        
+                        // 尝试数字ID和字符串ID
+                        let dbPost = await promisifyRequest(store.get(storedPostId));
+                        if (!dbPost) {
+                            dbPost = await promisifyRequest(store.get(storedPostId.toString()));
+                        }
+                        
+                        if (dbPost) {
+                            // 将从数据库找到的帖子重新添加到内存数组
+                            weiboPosts.push(dbPost);
+                            storedPost = dbPost;
+                            console.log(`成功从数据库恢复帖子ID ${storedPostId}`);
+                        } else {
+                            // 数据库中也没有，检查是否是异常ID（如0、1等）
+                            if (storedPostId < 1000000000000) {
+                                showToast('检测到数据异常，正在重新同步...');
+                                const repaired = await checkAndRepairDataConsistency();
+                                if (repaired) {
+                                    renderAllWeiboPosts();
+                                    return;
+                                }
+                            }
+                            
+                            // 数据库中也没有，可能帖子已被删除，刷新页面
+                            showToast('帖子可能已被删除，正在刷新页面...');
+                            renderAllWeiboPosts();
+                            return;
+                        }
+                    } else {
+                        showToast('数据库未就绪，请刷新页面重试');
+                        return;
+                    }
+                } catch (error) {
+                    console.error('从数据库恢复帖子失败:', error);
+                    showToast('数据加载失败，请刷新页面重试');
+                    return;
+                }
+            }
+        }
+        
+        // 检查帖子索引是否有效
+        if (!storedPost.data?.posts || !storedPost.data.posts[postIndex]) {
+            console.error(`帖子索引无效: storedPostId=${storedPostId}, postIndex=${postIndex}`);
+            showToast('帖子数据异常，正在刷新页面...');
+            renderAllWeiboPosts();
             return;
         }
+        
         const postData = storedPost.data.posts[postIndex];
 
         // --- Create User Comment ---
@@ -3198,7 +2180,13 @@ function showReplyBox(postHtmlId) {
         }
         postData.comments.push(userComment);
         renderAllWeiboPosts(); // Re-render to show the user's comment
-        showReplyBox(postHtmlId); // Keep the reply box open
+        await showReplyBox(postHtmlId); // Keep the reply box open
+
+        // 检查并更新全局记忆（用户回复内容）
+        if (window.characterMemoryManager) {
+            const forumContent = `用户回复论坛：\n原帖：${postData.post_content}\n用户回复：${replyContent}`;
+            window.characterMemoryManager.checkAndUpdateGlobalMemory(forumContent);
+        }
 
         try {
             const mentionRegex = /@(\S+)/;
@@ -3254,7 +2242,7 @@ function showReplyBox(postHtmlId) {
             renderAllWeiboPosts();
 
         } catch (error) {
-            showToast(`生成失败: ${error.message}`);
+            showApiError(error);
             console.error('AI回复生成失败:', error);
             // On failure, remove the user's comment that was added optimistically
             postData.comments.pop();
@@ -3280,10 +2268,11 @@ async function getMentionedAIReply(postData, mentioningComment, mentionedContact
     );
 
     if (!data.choices || data.choices.length === 0 || !data.choices[0].message.content) {
+        console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(data, null, 2));
         throw new Error('AI未返回有效回复');
     }
     
-    return data.choices[0].message.content.trim();
+    return data.choices[0].message.content;
 }
 
 async function getAIReply(postData, userReply, contactId) {
@@ -3302,10 +2291,11 @@ async function getAIReply(postData, userReply, contactId) {
     );
 
     if (!data.choices || data.choices.length === 0 || !data.choices[0].message.content) {
+        console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(data, null, 2));
         throw new Error('AI未返回有效回复');
     }
     
-    return data.choices[0].message.content.trim();
+    return data.choices[0].message.content;
 }
 
 
@@ -3335,6 +2325,147 @@ window.addEventListener('click', (event) => {
 });
 
 
+// 重新生成帖子图片
+async function regeneratePostImage(storedPostId, postIndex) {
+    const numericStoredPostId = parseInt(storedPostId, 10);
+    const storedPost = weiboPosts.find(p => p.id === numericStoredPostId);
+    
+    if (!storedPost || !storedPost.data.posts[postIndex]) {
+        showToast('找不到指定的帖子');
+        return;
+    }
+    
+    const post = storedPost.data.posts[postIndex];
+    
+    // 检查是否有原始图片描述
+    const imageDescription = post.original_image_description || post.image_description;
+    
+    if (!imageDescription || imageDescription.trim() === '暂无图片描述') {
+        showToast('该帖子没有图片描述，无法生成图片');
+        return;
+    }
+    
+    const unsplashKey = localStorage.getItem('forumUnsplashApiKey');
+    if (!unsplashKey) {
+        showToast('请先在设置中配置Unsplash API Key');
+        return;
+    }
+    
+    try {
+        showToast('正在重新生成图片...');
+        
+        const imageUrl = await fetchMatchingImageForPublish(imageDescription, unsplashKey);
+        if (imageUrl) {
+            // 更新帖子数据
+            post.actual_image_url = imageUrl;
+            post.original_image_description = imageDescription;
+            post.image_description = `<img src="${imageUrl}" alt="${imageDescription}" style="width: 100%; max-width: 300px; border-radius: 8px;">`;
+            
+            // 更新数据库
+            await updateWeiboPostInDB(storedPost);
+            
+            // 重新渲染
+            renderAllWeiboPosts();
+            
+            showToast('图片已重新生成！');
+        } else {
+            showToast('图片生成失败，请稍后重试');
+        }
+    } catch (error) {
+        console.error('重新生成图片失败:', error);
+        showToast('图片生成失败: ' + error.message);
+    }
+}
+
+
+// 删除帖子图片恢复文字显示
+async function removePostImage(storedPostId, postIndex) {
+    const numericStoredPostId = parseInt(storedPostId, 10);
+    const storedPost = weiboPosts.find(p => p.id === numericStoredPostId);
+    
+    if (!storedPost || !storedPost.data.posts[postIndex]) {
+        showToast('找不到指定的帖子');
+        return;
+    }
+    
+    const post = storedPost.data.posts[postIndex];
+    
+    // 检查是否有图片可以删除
+    if (!post.actual_image_url && !post.image_description.includes('<img')) {
+        showToast('该帖子没有Unsplash图片，无需删除');
+        return;
+    }
+    
+    try {
+        // 恢复原始文字描述
+        if (post.original_image_description) {
+            post.image_description = post.original_image_description;
+        } else {
+            // 如果没有原始描述，从img标签中提取alt文本
+            const imgMatch = post.image_description.match(/alt="([^"]*)"/);
+            if (imgMatch) {
+                post.image_description = imgMatch[1];
+            } else {
+                post.image_description = '图片描述';
+            }
+        }
+        
+        // 清除图片相关字段
+        delete post.actual_image_url;
+        delete post.original_image_description;
+        
+        // 更新数据库
+        await updateWeiboPostInDB(storedPost);
+        
+        // 重新渲染
+        renderAllWeiboPosts();
+        
+        showToast('已删除图片，恢复文字显示');
+    } catch (error) {
+        console.error('删除帖子图片失败:', error);
+        showToast('删除图片失败: ' + error.message);
+    }
+}
+
+// 重新生成帖子评论
+async function regeneratePostComments(storedPostId, postIndex) {
+    const numericStoredPostId = parseInt(storedPostId, 10);
+    const storedPost = weiboPosts.find(p => p.id === numericStoredPostId);
+    
+    if (!storedPost || !storedPost.data.posts[postIndex]) {
+        showToast('找不到指定的帖子');
+        return;
+    }
+    
+    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
+        showToast('请先配置API设置');
+        return;
+    }
+    
+    const post = storedPost.data.posts[postIndex];
+    
+    try {
+        showToast('正在重新生成评论...');
+        
+        // 构建重新生成评论的提示词
+        const newComments = await generateAICommentsWithCurrentTime(post.post_content);
+        
+        // 更新帖子评论
+        post.comments = newComments;
+        
+        // 更新数据库
+        await updateWeiboPostInDB(storedPost);
+        
+        // 重新渲染
+        renderAllWeiboPosts();
+        
+        showToast('评论已重新生成！');
+    } catch (error) {
+        console.error('重新生成评论失败:', error);
+        showApiError(error);
+    }
+}
+
 async function deleteWeiboPost(storedPostId, postIndex) {
     // Convert storedPostId to the correct type if necessary, assuming it's a number from the template
     const numericStoredPostId = parseInt(storedPostId, 10);
@@ -3355,9 +2486,9 @@ async function deleteWeiboPost(storedPostId, postIndex) {
         if (postGroup.data.posts.length === 0) {
             weiboPosts.splice(postGroupIndex, 1);
             // Also delete the entire entry from IndexedDB
-            if (isIndexedDBReady) {
+            if (window.isIndexedDBReady) {
                 try {
-                    const transaction = db.transaction(['weiboPosts'], 'readwrite');
+                    const transaction = window.db.transaction(['weiboPosts'], 'readwrite');
                     const store = transaction.objectStore('weiboPosts');
                     await promisifyRequest(store.delete(numericStoredPostId));
                     await promisifyTransaction(transaction);
@@ -3380,13 +2511,13 @@ async function deleteWeiboPost(storedPostId, postIndex) {
 }
 
 async function updateWeiboPost(postToUpdate) {
-    if (!isIndexedDBReady) {
+    if (!window.isIndexedDBReady) {
         console.error('IndexedDB not ready, cannot update post.');
         showToast('数据库错误，无法更新帖子');
         return;
     }
     try {
-        const transaction = db.transaction(['weiboPosts'], 'readwrite');
+        const transaction = window.db.transaction(['weiboPosts'], 'readwrite');
         const store = transaction.objectStore('weiboPosts');
         await promisifyRequest(store.put(postToUpdate));
         await promisifyTransaction(transaction);
@@ -3396,24 +2527,638 @@ async function updateWeiboPost(postToUpdate) {
     }
 }
 
-
+// 别名函数，用于保持一致性
+async function updateWeiboPostInDB(postToUpdate) {
+    return await updateWeiboPost(postToUpdate);
+}
 
 // --- 朋友圈功能 ---
 
+// 存储上传的图片数据
+let momentUploadedImages = [];
+
+// 朋友圈发布方式选择
 function showPublishMomentModal() {
-    document.getElementById('publishMomentModal').style.display = 'block';
-    document.getElementById('momentPreview').style.display = 'none';
-    document.getElementById('publishMomentBtn').disabled = true;
+    // 检查朋友圈操作是否被锁定
+    if (window.momentsLockManager && window.momentsLockManager.checkLocked()) {
+        return;
+    }
+    
+    // 显示朋友圈发布方式选择模态框
+    showModal('momentChoiceModal');
 }
 
-function closePublishMomentModal() {
-    document.getElementById('publishMomentModal').style.display = 'none';
+function selectMomentType(type) {
+    closeModal('momentChoiceModal');
+    
+    if (type === 'manual') {
+        showManualMomentModal();
+    } else if (type === 'generate') {
+        showGenerateMomentModal();
+    }
+}
+
+async function showManualMomentModal() {
+    showModal('manualMomentModal');
+    
+    // 获取用户信息
+    const userProfile = await getUserProfile();
+    
+    // 设置发布人为当前用户
+    document.getElementById('manualMomentAuthor').value = userProfile.name || '我';
+    
+    // 清空之前的内容和图片
+    document.getElementById('manualMomentContent').value = '';
+    momentUploadedImages = [];
+    document.getElementById('momentImagesPreview').innerHTML = '';
+}
+
+function showGenerateMomentModal() {
+    // [DEBUG-MOMENTS-ROLES-START] 调试信息，修复完成后删除
+    console.log('[DEBUG] showGenerateMomentModal 被调用');
+    console.log('[DEBUG] 打开生成朋友圈模态框时的全局状态:', {
+        windowContacts: !!window.contacts,
+        contactsLength: window.contacts ? window.contacts.length : 0,
+        isIndexedDBReady: !!window.isIndexedDBReady,
+        dbConnected: !!window.db,
+        dbVersion: window.db ? window.db.version : 'no-db',
+        timestamp: new Date().toISOString()
+    });
+    
+    if (window.contacts && window.contacts.length > 0) {
+        const privateContacts = window.contacts.filter(c => c.type === 'private');
+        console.log('[DEBUG] 私聊角色详情:', {
+            totalContacts: window.contacts.length,
+            privateContactsCount: privateContacts.length,
+            privateContactsNames: privateContacts.map(c => ({ name: c.name, id: c.id, type: c.type }))
+        });
+    }
+    // [DEBUG-MOMENTS-ROLES-END]
+    
+    showModal('generateMomentModal');
+    
+    // 清空表单
+    document.getElementById('momentGenTopic').value = '';
+    // momentUnsplashKey元素已从HTML中移除，移除相关代码避免null指针异常
+    
+    // 加载角色列表
+    loadMomentCharacterOptions();
+}
+
+// 加载角色选项 - 增强版本，处理数据未就绪情况
+async function loadMomentCharacterOptions() {
+    const select = document.getElementById('momentGenCharacterSelect');
+    select.innerHTML = '<option value="">加载中...</option>';
+    
+    // [DEBUG-MOMENTS-ROLES-START] 调试信息，修复完成后删除
+    console.log('[DEBUG] loadMomentCharacterOptions 开始执行');
+    console.log('[DEBUG] 当前状态:', {
+        windowContacts: !!window.contacts,
+        contactsLength: window.contacts ? window.contacts.length : 0,
+        isIndexedDBReady: !!window.isIndexedDBReady,
+        dbConnected: !!window.db,
+        dbReadyState: window.db ? window.db.readyState : 'no-db'
+    });
+    // [DEBUG-MOMENTS-ROLES-END]
+    
+    try {
+        // 确保数据已经加载完成 - 最多等待10秒
+        let attempts = 0;
+        const maxAttempts = 20; // 10秒 (20 * 500ms)
+        
+        while ((!window.contacts || window.contacts.length === 0) && attempts < maxAttempts) {
+            console.log(`[DEBUG] 角色数据未准备好，等待加载... (尝试 ${attempts + 1}/${maxAttempts})`);
+            
+            // 如果数据库还没就绪，等待数据库初始化
+            if (!window.isIndexedDBReady || !window.db) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                attempts++;
+                continue;
+            }
+            
+            // 如果数据库就绪但contacts为空，尝试主动加载
+            if ((!window.contacts || window.contacts.length === 0) && attempts === 5) {
+                console.log('[DEBUG] 主动触发数据重新加载');
+                try {
+                    await loadDataFromDB();
+                } catch (loadError) {
+                    console.error('[DEBUG] 主动加载数据失败:', loadError);
+                }
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 500));
+            attempts++;
+        }
+        
+        // 更新选择框
+        select.innerHTML = '<option value="">请选择...</option>';
+        
+        // [DEBUG-MOMENTS-ROLES-START] 调试信息，修复完成后删除
+        console.log('[DEBUG] 等待完成后的状态:', {
+            windowContacts: !!window.contacts,
+            contactsLength: window.contacts ? window.contacts.length : 0,
+            attempts: attempts,
+            timedOut: attempts >= maxAttempts
+        });
+        // [DEBUG-MOMENTS-ROLES-END]
+        
+        // 只添加联系人选项（AI角色），不包括"我"
+        if (window.contacts && window.contacts.length > 0) {
+            let addedCount = 0;
+            window.contacts.forEach(contact => {
+                if (contact.type === 'private') { // 只显示私聊角色
+                    const option = document.createElement('option');
+                    option.value = contact.id;
+                    option.textContent = contact.name;
+                    select.appendChild(option);
+                    addedCount++;
+                    
+                    // [DEBUG-MOMENTS-ROLES-START] 调试信息，修复完成后删除
+                    console.log(`[DEBUG] 添加角色: ${contact.name} (ID: ${contact.id})`);
+                    // [DEBUG-MOMENTS-ROLES-END]
+                }
+            });
+            
+            // [DEBUG-MOMENTS-ROLES-START] 调试信息，修复完成后删除
+            console.log(`[DEBUG] 成功添加 ${addedCount} 个角色到选择列表`);
+            // [DEBUG-MOMENTS-ROLES-END]
+            
+            if (addedCount === 0) {
+                select.innerHTML = '<option value="">未找到AI角色，请先添加角色</option>';
+                console.warn('[DEBUG] 没有找到任何私聊类型的角色');
+            }
+        } else {
+            select.innerHTML = '<option value="">未找到AI角色，请先添加角色</option>';
+            console.warn('[DEBUG] window.contacts 为空或不存在');
+        }
+        
+    } catch (error) {
+        console.error('[DEBUG] 加载角色选项失败:', error);
+        select.innerHTML = '<option value="">加载失败，请重试</option>';
+        
+        // 如果是严重错误，尝试显示用户友好的错误信息
+        if (typeof showToast === 'function') {
+            showToast('角色列表加载失败，请刷新页面重试', 'error');
+        }
+    }
+}
+
+// 处理生成朋友圈表单提交
+async function handleGenerateMoment(event) {
+    event.preventDefault();
+    
+    const contactId = document.getElementById('momentGenCharacterSelect').value;
+    const topic = document.getElementById('momentGenTopic').value.trim();
+    // momentUnsplashKey元素已从HTML中移除，从localStorage直接获取
+    const unsplashKey = localStorage.getItem('unsplashApiKey') || '';
+    
+    if (!contactId) {
+        showToast('请选择角色');
+        return;
+    }
+    
+    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
+        showToast('请先设置API');
+        return;
+    }
+    
+    // Unsplash API Key已从localStorage获取，无需重复保存
+    
+    try {
+        // 找到角色信息
+        const character = window.contacts?.find(c => c.id === contactId);
+        if (!character) {
+            showToast('未找到选中的角色');
+            return;
+        }
+        
+        showToast('正在生成朋友圈内容和评论...');
+        
+        // 获取用户信息
+        const userProfile = await getUserProfile();
+        
+        // 一次性生成朋友圈内容、图片关键词和评论
+        const momentData = await generateMomentAndComments(character, userProfile, topic);
+        
+        let imageUrl = null;
+        
+        // 如果提供了Unsplash API Key 且 AI返回了关键词，尝试获取配图
+        if (unsplashKey && momentData.imageKeyword) {
+            showToast('正在获取配图...');
+            try {
+                // 使用AI返回的关键词进行搜索
+                imageUrl = await getUnsplashImage(momentData.imageKeyword, unsplashKey);
+            } catch (imageError) {
+                console.warn('获取Unsplash图片失败:', imageError);
+                // 即使图片获取失败也继续发布朋友圈
+            }
+        }
+        
+        // 创建朋友圈对象
+        const moment = {
+            id: Date.now().toString(),
+            authorName: character.name,
+            authorAvatar: character.avatar,
+            content: momentData.content,
+            image: imageUrl, // Unsplash图片URL
+            imageCount: imageUrl ? 1 : 0,
+            isUnsplashImage: imageUrl ? true : false, // 标记为Unsplash图片
+            time: new Date().toISOString(),
+            likes: 0,
+            comments: momentData.comments
+        };
+        
+        // 保存朋友圈
+        moments.unshift(moment);
+        await saveDataToDB();
+        await renderMomentsList();
+        
+        closeModal('generateMomentModal');
+        showToast('朋友圈发布成功！');
+        
+    } catch (error) {
+        console.error('生成朋友圈失败:', error);
+        showApiError(error);
+    }
+}
+
+// 获取Unsplash图片
+async function getUnsplashImage(searchQuery, apiKey) {
+    // 现在此函数直接调用新的 fetchMatchingImageForPublish
+    return await fetchMatchingImageForPublish(searchQuery, apiKey);
+}
+
+// 一次性生成朋友圈内容和评论
+async function generateMomentAndComments(character, userProfile, topic = '') {
+    try {
+        
+        // 检查必要的依赖
+        if (!window.promptBuilder) {
+            throw new Error('PromptBuilder未初始化');
+        }
+        
+        if (!window.apiService) {
+            throw new Error('APIService未初始化');
+        }
+        
+        if (!apiSettings || !apiSettings.url || !apiSettings.key || !apiSettings.model) {
+            throw new Error('API设置未完成');
+        }
+        
+        // 使用PromptBuilder构建prompt
+        const systemPrompt = await window.promptBuilder.buildMomentAndCommentsPrompt(
+            character, 
+            userProfile, 
+            apiSettings, 
+            window.contacts, 
+            topic
+        );
+        
+        
+        // 使用云端API服务
+        const data = await window.apiService.callOpenAIAPI(
+            apiSettings.url,
+            apiSettings.key,
+            apiSettings.model,
+            [{ role: 'user', content: systemPrompt }],
+            {
+                temperature: 0.9,
+                max_tokens: 10000,
+                // 强制要求返回JSON格式，以匹配新的提示词结构
+                response_format: { type: "json_object" },
+            },
+            apiSettings.timeout * 1000 || 60000
+        );
+        
+        
+        const rawContent = data.choices[0]?.message?.content;
+        console.log('API返回的原始内容:', rawContent);
+        
+        if (!rawContent) {
+            console.error('ERROR: API返回空内容 - API完整返回:', JSON.stringify(data, null, 2));
+            throw new Error('API返回空内容');
+        }
+        
+        // 使用统一的JSON提取函数清理markdown语法
+        let cleanedJson;
+        try {
+            cleanedJson = window.apiService.extractJSON(rawContent);
+        } catch (extractError) {
+            console.error('ERROR: JSON提取失败 - API完整返回:', rawContent);
+            console.error('ERROR: JSON提取失败 - 错误详情:', extractError);
+            throw new Error(`JSON提取失败: ${extractError.message}`);
+        }
+        
+        // 解析JSON结果
+        let momentData;
+        try {
+            momentData = JSON.parse(cleanedJson);
+        } catch (parseError) {
+            console.error('ERROR: 解析JSON失败 - API完整返回:', rawContent);
+            console.error('ERROR: 解析JSON失败 - 错误详情:', parseError);
+            throw new Error('AI返回的数据格式不正确，无法解析为JSON。');
+        }
+        
+        // 确保返回格式正确
+        if (!momentData.content) {
+            throw new Error('生成的朋友圈内容为空');
+        }
+        
+        if (!Array.isArray(momentData.comments)) {
+            momentData.comments = [];
+        }
+
+        // 获取图片关键词，可能为 null
+        const imageKeyword = momentData.imageKeyword || null;
+        
+        // 转换评论格式以兼容现有系统
+        const formattedComments = momentData.comments.map(comment => ({
+            author: comment.author || '匿名',
+            content: comment.content || '',
+            like: comment.like || false,
+            timestamp: new Date().toISOString()
+        }));
+        
+        const result = {
+            content: momentData.content,
+            imageKeyword: imageKeyword, // 添加新的字段
+            comments: formattedComments
+        };
+        
+        return result;
+        
+    } catch (error) {
+        console.error('生成朋友圈和评论失败:', error);
+        throw error; // 直接抛出错误，不返回默认内容
+    }
+}
+
+// === 图片AI识别相关功能 ===
+
+// 分析上传的图片内容
+async function analyzeImageContent(imageBase64, prompt = '请描述这张图片的内容') {
+    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
+        throw new Error('请先设置API');
+    }
+    
+    try {
+        const data = await window.apiService.callOpenAIAPI(
+            apiSettings.url,
+            apiSettings.key,
+            apiSettings.model,
+            [{
+                role: 'user',
+                content: [
+                    {
+                        type: 'text',
+                        text: prompt
+                    },
+                    {
+                        type: 'image_url',
+                        image_url: {
+                            url: imageBase64
+                        }
+                    }
+                ]
+            }],
+            { max_tokens: 5000, temperature: 0.7 },
+            (apiSettings.timeout || 60) * 1000
+        );
+        
+        return data.choices[0]?.message?.content || '无法识别图片内容';
+        
+    } catch (error) {
+        console.error('图片分析失败:', error);
+        return '图片分析功能暂时不可用';
+    }
+}
+
+// 根据图片内容生成朋友圈文案
+async function generateMomentTextFromImage(imageBase64, character) {
+    const analysisPrompt = `你是${character.name}，性格特点：${character.personality}。
+请看这张图片，然后以${character.name}的身份发布一条朋友圈动态。
+
+要求：
+1. 基于图片内容来写朋友圈
+2. 符合${character.name}的性格特点和说话风格
+3. 内容要自然真实，就像真的朋友圈一样
+4. 长度控制在30-100字之间
+5. 可以适当使用emoji表情
+6. 不要说"这张图片"之类的话，要像是自己拍的照片一样
+
+直接返回朋友圈内容，不要有其他说明文字。`;
+
+    return await analyzeImageContent(imageBase64, analysisPrompt);
+}
+
+// 检查图片内容是否合适
+async function checkImageContent(imageBase64) {
+    const checkPrompt = `请检查这张图片是否包含以下不当内容：
+1. 暴力血腥内容
+2. 色情内容  
+3. 政治敏感内容
+4. 其他不适合在社交媒体分享的内容
+
+如果图片内容合适，请回复"合适"；如果不合适，请简短说明原因。`;
+
+    const result = await analyzeImageContent(imageBase64, checkPrompt);
+    return {
+        isAppropriate: result.includes('合适'),
+        reason: result.includes('合适') ? '' : result
+    };
+}
+
+// 为特定角色生成朋友圈内容
+async function generateMomentForCharacter(character, topic = '') {
+    const topicPrompt = topic ? `围绕"${topic}"这个主题，` : '';
+    
+    const prompt = `你是${character.name}，性格特点：${character.personality}。
+请${topicPrompt}发布一条符合你性格的朋友圈动态。
+
+要求：
+1. 内容要符合${character.name}的性格特点
+2. 语言风格要自然，就像真的朋友圈一样
+3. 长度控制在50-150字之间
+4. 可以包含生活感悟、日常分享、心情表达等
+5. 不要使用过于正式的语言
+6. 可以适当使用emoji表情
+
+直接返回朋友圈内容，不要有其他说明文字。`;
+
+    const data = await window.apiService.callOpenAIAPI(
+        apiSettings.url,
+        apiSettings.key,
+        apiSettings.model,
+        [{ role: 'user', content: prompt }],
+        { max_tokens: 5000, temperature: 0.8 },
+        (apiSettings.timeout || 60) * 1000
+    );
+
+    return data.choices[0]?.message?.content || '今天心情不错~';
+}
+
+// 处理图片上传
+async function handleMomentImagesUpload(event) {
+    const files = Array.from(event.target.files);
+    if (files.length + momentUploadedImages.length > 9) {
+        showToast('最多只能上传9张图片');
+        return;
+    }
+    
+    for (const file of files) {
+        if (file.type.startsWith('image/')) {
+            try {
+                // 直接存储File对象，用于后续保存到文件系统
+                momentUploadedImages.push({
+                    file: file,
+                    previewUrl: await fileToBase64(file) // 用于预览
+                });
+            } catch (error) {
+                console.error('图片上传失败:', error);
+                showToast(`图片上传失败: ${error.message || '未知错误'}`, 'error');
+            }
+        }
+    }
+    
+    renderMomentImagesPreview();
+    event.target.value = ''; // 清空input
+}
+
+// 渲染图片预览
+function renderMomentImagesPreview() {
+    const preview = document.getElementById('momentImagesPreview');
+    preview.innerHTML = '';
+    
+    momentUploadedImages.forEach((imageItem, index) => {
+        const item = document.createElement('div');
+        item.className = 'moment-image-item';
+        item.innerHTML = `
+            <img src="${imageItem.previewUrl}" alt="预览图">
+            <div class="moment-image-remove" onclick="removeMomentUploadImage(${index})">×</div>
+        `;
+        preview.appendChild(item);
+    });
+}
+
+// 删除图片
+function removeMomentUploadImage(index) {
+    momentUploadedImages.splice(index, 1);
+    renderMomentImagesPreview();
+}
+
+// 文件转Base64
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+// 手动发布朋友圈
+async function handleManualMoment(event) {
+    event.preventDefault();
+    
+    const authorName = document.getElementById('manualMomentAuthor').value;
+    const content = document.getElementById('manualMomentContent').value.trim();
+    
+    if (!content) {
+        showToast('请填写朋友圈内容');
+        return;
+    }
+    
+    closeModal('manualMomentModal');
+    
+    // 发布手动朋友圈
+    await publishManualMoment(authorName, content, momentUploadedImages);
+}
+
+async function publishManualMoment(authorName, content, imageItems) {
+    // 使用当前时间作为发布时间，就像论坛一样
+    const momentCreatedAt = new Date();
+    const momentId = Date.now().toString();
+    
+    try {
+        // 存储图片到文件系统
+        let imageFileIds = [];
+        let imageCount = 0;
+        
+        if (imageItems && imageItems.length > 0) {
+            showToast('正在保存图片...');
+            
+            // 确保ImageStorageAPI已初始化
+            if (window.ImageStorageAPI) {
+                await window.ImageStorageAPI.init();
+                
+                // 提取File对象
+                const imageFiles = imageItems.map(item => item.file);
+                
+                // 存储多张图片
+                imageFileIds = await window.ImageStorageAPI.storeMomentImages(imageFiles, momentId);
+                imageCount = imageFiles.length;
+                
+            } else {
+                console.warn('ImageStorageAPI未初始化，跳过图片存储');
+            }
+        }
+        
+        // 创建朋友圈对象
+        const moment = {
+            id: momentId,
+            authorName: authorName,
+            authorAvatar: userProfile.avatar || '',
+            content: content,
+            imageFileIds: imageFileIds, // 存储fileId数组
+            imageCount: imageCount, // 存储图片数量，用于后续获取
+            time: momentCreatedAt.toISOString(),
+            likes: 0,
+            comments: [] // 先创建空评论
+        };
+
+        // 保存并立即显示朋友圈
+        moments.unshift(moment);
+        await saveDataToDB();
+        await renderMomentsList();
+        showToast('朋友圈发布成功，正在生成评论...');
+
+        // 异步生成评论
+        setTimeout(async () => {
+            try {
+                // 使用当前时间生成评论（就像论坛一样）
+                const commentsWithTime = await generateAICommentsWithCurrentTime(content);
+                // 更新朋友圈的评论
+                const momentIndex = moments.findIndex(m => m.id === moment.id);
+                if (momentIndex !== -1) {
+                    moments[momentIndex].comments = commentsWithTime;
+                    await saveDataToDB();
+                    await renderMomentsList();
+                }
+            } catch (error) {
+                console.error('评论生成失败:', error);
+            }
+        }, 1000);
+        
+        // 清空表单和图片
+        document.getElementById('manualMomentContent').value = '';
+        momentUploadedImages = [];
+        
+    } catch (error) {
+        console.error('发布朋友圈失败:', error);
+        showToast('发布失败: ' + error.message);
+    }
 }
 
 /**
  * @description 根据聊天记录和角色信息生成朋友圈内容
+ * @changes **MODIFIED**: Changed API request to be compatible with OpenAI format.
  */
 async function generateMomentContent() {
+    // 检查朋友圈操作是否被锁定
+    if (window.momentsLockManager && window.momentsLockManager.checkLocked()) {
+        return;
+    }
+    
     if (!currentContact) {
         showToast('请先选择一个联系人');
         return;
@@ -3439,22 +3184,29 @@ async function generateMomentContent() {
             (apiSettings.timeout || 60) * 1000
         );
 
-        const momentContent = data.choices[0].message.content.trim() || '';
+        const momentContent = data.choices[0].message.content || '';
 
         let imageUrl = null;
-        const unsplashKey = document.getElementById('unsplashApiKey').value.trim();
+        // unsplashApiKey元素已从HTML中移除，从localStorage直接获取
+        const unsplashKey = localStorage.getItem('unsplashApiKey') || '';
         if (unsplashKey) {
             imageUrl = await fetchMatchingImageForPublish(momentContent, unsplashKey);
         }
 
-        const comments = await generateAIComments(momentContent);
+        // 使用当前时间生成评论（就像论坛一样）
+        const comments = await generateAICommentsWithCurrentTime(momentContent);
+
+        // 生成朋友圈ID
+        const momentId = Date.now().toString();
 
         const moment = {
-            id: Date.now().toString(),
+            id: momentId,
             authorName: currentContact.name,
             authorAvatar: currentContact.avatar,
             content: momentContent,
-            image: imageUrl,
+            image: imageUrl, // 直接保存Unsplash URL
+            imageCount: imageUrl ? 1 : 0, // 简单的计数，不再处理文件存储
+            isUnsplashImage: imageUrl ? true : false, // 标记为Unsplash图片
             time: new Date().toISOString(),
             likes: 0,
             comments: comments
@@ -3462,45 +3214,74 @@ async function generateMomentContent() {
 
         moments.unshift(moment);
         await saveDataToDB();
-        renderMomentsList();
-        closePublishMomentModal();
+        await renderMomentsList();
+        closeModal('generateMomentModal');
         showToast('朋友圈发布成功');
 
     } catch (error) {
         console.error('生成朋友圈失败:', error);
-        showToast('生成失败: ' + error.message);
+        showApiError(error);
     } finally {
         generateBtn.disabled = false;
         generateBtn.textContent = '生成朋友圈';
     }
 }
 
+
 /**
  * @description 根据内容生成图片搜索关键词，并调用 Unsplash API 获取图片
+ * @changes 现在使用AI生成更精准的搜索关键词
  */
 async function fetchMatchingImageForPublish(content, apiKey) {
     try {
-        let searchQuery = await generateImageSearchQuery(content);
-        if (!searchQuery) {
-            searchQuery = extractImageKeywords(content);
+        // 使用AI生成更精准的搜索关键词
+        const searchQuery = await generateImageSearchKeyword(content);
+        console.log(`[fetchMatchingImageForPublish] 原始内容: "${content}"`);
+        console.log(`[fetchMatchingImageForPublish] 搜索关键词: "${searchQuery}"`);
+        
+        // 检查关键词是否为英文（简单检查）
+        const isEnglish = /^[a-zA-Z0-9\s\-.,!?]+$/.test(searchQuery.trim());
+        if (!isEnglish) {
+            console.warn(`[fetchMatchingImageForPublish] 关键词似乎不是英文，可能AI生成失败: "${searchQuery}"`);
         }
-        // 这是直接从浏览器向Unsplash API发起的请求
-        const response = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(searchQuery)}&per_page=3&orientation=landscape`, {
+        
+        // 调用Unsplash API搜索图片
+        const apiUrl = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(searchQuery)}&per_page=3&orientation=landscape`;
+        console.log(`[fetchMatchingImageForPublish] API URL: ${apiUrl}`);
+        
+        const response = await fetch(apiUrl, {
             headers: {
                 'Authorization': `Client-ID ${apiKey}`
             }
         });
-        if (!response.ok) throw new Error('Unsplash API请求失败');
+        
+        console.log(`[fetchMatchingImageForPublish] Response status: ${response.status} ${response.statusText}`);
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`[fetchMatchingImageForPublish] API错误详情: ${errorText}`);
+            throw new Error(`Unsplash API请求失败: ${response.status} ${response.statusText}`);
+        }
+        
         const data = await response.json();
-        return (data.results && data.results.length > 0) ? data.results[0].urls.regular : null;
+        console.log(`[fetchMatchingImageForPublish] 搜索结果: 使用关键词"${searchQuery}"找到${data.results?.length || 0}张图片`);
+        
+        if (data.results && data.results.length > 0) {
+            console.log(`[fetchMatchingImageForPublish] 返回图片URL: ${data.results[0].urls.regular}`);
+            return data.results[0].urls.regular;
+        } else {
+            console.warn(`[fetchMatchingImageForPublish] 未找到匹配图片`);
+            return null;
+        }
     } catch (error) {
-        console.error('获取配图失败:', error);
+        console.error('[fetchMatchingImageForPublish] 获取配图失败:', error);
         return null;
     }
 }
 
 /**
  * @description 调用 API 生成图片搜索关键词
+ * @changes **MODIFIED**: Changed API request to be compatible with OpenAI format.
  */
 async function generateImageSearchQuery(content) {
     if (!apiSettings.url || !apiSettings.key || !apiSettings.model) return null;
@@ -3514,7 +3295,7 @@ async function generateImageSearchQuery(content) {
             { temperature: 0.5 },
             (apiSettings.timeout || 60) * 1000
         );
-        return data.choices[0].message.content.trim() || null;
+        return data.choices[0].message.content || null;
     } catch (error) {
         console.error('AI关键词生成失败:', error);
         return null;
@@ -3534,13 +3315,14 @@ function extractImageKeywords(content) {
 
 /**
  * @description 调用 API 生成朋友圈评论
+ * @changes **MODIFIED**: Changed API request to be compatible with OpenAI format.
  */
 async function generateAIComments(momentContent) {
     if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
         return [];
     }
     try {
-        const systemPrompt = window.promptBuilder.buildCommentsPrompt(momentContent);
+        const systemPrompt = await window.promptBuilder.buildCommentsPrompt(momentContent, contacts);
         const data = await window.apiService.callOpenAIAPI(
             apiSettings.url,
             apiSettings.key,
@@ -3550,19 +3332,139 @@ async function generateAIComments(momentContent) {
             (apiSettings.timeout || 60) * 1000
         );
         
-        const jsonText = data.choices[0].message.content;
-        if (!jsonText) {
+        const rawText = data.choices[0].message.content;
+        if (!rawText) {
+            console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(data, null, 2));
             throw new Error("AI未返回有效的JSON格式");
         }
 
-        const commentsData = JSON.parse(jsonText);
+        // 使用统一的JSON提取函数清理markdown语法
+        let cleanedJson;
+        try {
+            cleanedJson = window.apiService.extractJSON(rawText);
+        } catch (extractError) {
+            console.error('ERROR: JSON提取失败 - API完整返回:', rawText);
+            console.error('ERROR: JSON提取失败 - 错误详情:', extractError);
+            throw new Error(`JSON提取失败: ${extractError.message}`);
+        }
+
+        const commentsData = JSON.parse(cleanedJson);
         return commentsData.comments.map(comment => ({
             author: comment.author,
             content: comment.content,
-            time: new Date(Date.now() - Math.floor(Math.random() * 600000)).toISOString()
+            like: comment.like !== undefined ? comment.like : false, // 默认为false
+            time: new Date().toISOString() // 使用当前时间，像论坛一样
         }));
     } catch (error) {
         console.error('AI评论生成失败:', error);
+        return [];
+    }
+}
+
+// 生成带当前时间戳的评论（像论坛一样）
+async function generateAICommentsWithCurrentTime(momentContent) {
+    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
+        return [];
+    }
+    try {
+        const systemPrompt = await window.promptBuilder.buildCommentsPrompt(momentContent, contacts);
+        const data = await window.apiService.callOpenAIAPI(
+            apiSettings.url,
+            apiSettings.key,
+            apiSettings.model,
+            [{ role: 'user', content: systemPrompt }],
+            { response_format: { type: "json_object" }, temperature: 0.9 },
+            (apiSettings.timeout || 60) * 1000
+        );
+        
+        const rawText = data.choices[0].message.content;
+        if (!rawText) {
+            console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(data, null, 2));
+            throw new Error("AI未返回有效的JSON格式");
+        }
+
+        // 使用统一的JSON提取函数清理markdown语法
+        let cleanedJson;
+        try {
+            cleanedJson = window.apiService.extractJSON(rawText);
+        } catch (extractError) {
+            console.error('ERROR: JSON提取失败 - API完整返回:', rawText);
+            console.error('ERROR: JSON提取失败 - 错误详情:', extractError);
+            throw new Error(`JSON提取失败: ${extractError.message}`);
+        }
+
+        const commentsData = JSON.parse(cleanedJson);
+        const baseComments = commentsData.comments || [];
+        
+        // 所有评论都使用当前时间（就像论坛一样）
+        return baseComments.map((comment) => {
+            return {
+                author: comment.author,
+                content: comment.content,
+                like: comment.like !== undefined ? comment.like : false, // 保留点赞状态
+                time: new Date().toISOString() // 使用当前时间
+            };
+        });
+    } catch (error) {
+        console.error('生成带时间戳评论失败:', error);
+        return [];
+    }
+}
+
+// 生成带时间戳的评论（基于朋友圈发布时间）
+async function generateAICommentsWithTime(momentContent, momentTime) {
+    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
+        return [];
+    }
+    try {
+        const systemPrompt = await window.promptBuilder.buildCommentsPrompt(momentContent, contacts);
+        const data = await window.apiService.callOpenAIAPI(
+            apiSettings.url,
+            apiSettings.key,
+            apiSettings.model,
+            [{ role: 'user', content: systemPrompt }],
+            { response_format: { type: "json_object" }, temperature: 0.9 },
+            (apiSettings.timeout || 60) * 1000
+        );
+        
+        const rawText = data.choices[0].message.content;
+        if (!rawText) {
+            console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(data, null, 2));
+            throw new Error("AI未返回有效的JSON格式");
+        }
+
+        // 使用统一的JSON提取函数清理markdown语法
+        let cleanedJson;
+        try {
+            cleanedJson = window.apiService.extractJSON(rawText);
+        } catch (extractError) {
+            console.error('ERROR: JSON提取失败 - API完整返回:', rawText);
+            console.error('ERROR: JSON提取失败 - 错误详情:', extractError);
+            throw new Error(`JSON提取失败: ${extractError.message}`);
+        }
+
+        const commentsData = JSON.parse(cleanedJson);
+        const baseComments = commentsData.comments || [];
+        
+        // 为每个评论添加时间戳（在朋友圈发布时间之后）
+        const momentTimeMs = new Date(momentTime).getTime();
+        return baseComments.map((comment, index) => {
+            // 评论时间在朋友圈发布后的几分钟到几小时内
+            const minDelayMs = (index + 1) * 2 * 60 * 1000; // 每个评论间隔至少2分钟
+            const maxDelayMs = (index + 1) * 30 * 60 * 1000; // 最多30分钟后
+            const randomDelay = minDelayMs + Math.random() * (maxDelayMs - minDelayMs);
+            const commentTime = new Date(momentTimeMs + randomDelay);
+            
+            const processedComment = {
+                author: comment.author,
+                content: comment.content,
+                like: comment.like !== undefined ? comment.like : false, // 默认为false
+                time: commentTime.toISOString()
+            };
+            return processedComment;
+        });
+    } catch (error) {
+        console.error('生成带时间戳评论失败:', error);
         return [];
     }
 }
@@ -3580,12 +3482,13 @@ async function publishMoment() {
     publishBtn.disabled = true;
     publishBtn.textContent = '发布中...';
     try {
-        const comments = await generateAIComments(content);
+        // 使用当前时间生成评论（就像论坛一样）
+        const comments = await generateAICommentsWithCurrentTime(content);
         const moment = { id: Date.now().toString(), authorName: currentContact.name, authorAvatar: currentContact.avatar, content, image: imageUrl, time: new Date().toISOString(), likes: 0, comments };
         moments.unshift(moment);
         await saveDataToDB(); // 使用IndexedDB保存
-        renderMomentsList();
-        closePublishMomentModal();
+        await renderMomentsList();
+        closeModal('generateMomentModal');
         showToast('朋友圈发布成功');
     } catch (error) {
         console.error('发布朋友圈失败:', error);
@@ -3596,7 +3499,7 @@ async function publishMoment() {
     }
 }
 
-function renderMomentsList() {
+async function renderMomentsList() {
     const momentsEmpty = document.getElementById('momentsEmpty');
     const momentsList = document.getElementById('momentsList');
     if (moments.length === 0) { 
@@ -3606,19 +3509,253 @@ function renderMomentsList() {
         momentsEmpty.style.display = 'none';
         momentsList.style.display = 'block';
         momentsList.innerHTML = '';
-        moments.forEach(moment => {
+        
+        // 按时间排序，从新到旧（最新的在前面）
+        const sortedMoments = [...moments].sort((a, b) => {
+            return new Date(b.time) - new Date(a.time);
+        });
+        
+        for (const moment of sortedMoments) {
             const momentDiv = document.createElement('div');
             momentDiv.className = 'moment-item';
-            let avatarContent = moment.authorAvatar ? `<img src="${moment.authorAvatar}">` : moment.authorName[0];
-            let imageContent = moment.image ? `<img src="${moment.image}" class="moment-image">` : '';
+            
+            // 处理作者头像 - 支持新的文件系统格式
+            let avatarContent = '';
+            const author = window.contacts ? window.contacts.find(c => c.name === moment.authorName) : null;
+            
+            try {
+                if (author) {
+                    // 使用getAvatarHTML获取联系人头像
+                    const avatarHTML = await getAvatarHTML(author, 'contact', '');
+                    if (avatarHTML.includes('<img')) {
+                        const srcMatch = avatarHTML.match(/src="([^"]+)"/);
+                        if (srcMatch) {
+                            avatarContent = `<img src="${srcMatch[1]}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+                        }
+                    }
+                } else if (moment.authorName === userProfile.name) {
+                    // 如果是当前用户的动态，使用getAvatarHTML获取用户头像
+                    const avatarHTML = await getAvatarHTML(userProfile, 'user', '');
+                    if (avatarHTML.includes('<img')) {
+                        const srcMatch = avatarHTML.match(/src="([^"]+)"/);
+                        if (srcMatch) {
+                            avatarContent = `<img src="${srcMatch[1]}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+                        }
+                    }
+                }
+                
+                // 如果没有头像或头像获取失败，使用文字头像
+                if (!avatarContent) {
+                    avatarContent = `<div style="width: 40px; height: 40px; border-radius: 6px; background: #ddd; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #333;">${moment.authorName.charAt(0)}</div>`;
+                }
+            } catch (error) {
+                console.warn('获取朋友圈头像失败，使用回退逻辑:', error);
+                // 回退到旧的逻辑
+                if (author && author.avatar) {
+                    avatarContent = `<img src="${author.avatar}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+                } else if (moment.authorName === userProfile.name && userProfile.avatar) {
+                    avatarContent = `<img src="${userProfile.avatar}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+                } else {
+                    avatarContent = `<div style="width: 40px; height: 40px; border-radius: 6px; background: #ddd; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #333;">${moment.authorName.charAt(0)}</div>`;
+                }
+            }
+            
+            // 处理图片内容 - 优先处理Unsplash图片，然后是用户上传的图片
+            let imageContent = '';
+            
+            // 优先处理Unsplash图片（直接使用URL）
+            if (moment.isUnsplashImage && moment.image) {
+                imageContent = `<div class="moment-images-grid grid-1">
+                                  <div class="moment-image-container">
+                                      <img src="${moment.image}" class="moment-grid-image" onclick="viewImage('${moment.image}')" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" alt="Unsplash图片">
+                                      <div class="moment-image-error" style="display: none;">
+                                          <div class="image-error-icon">📷</div>
+                                          <div class="image-error-text">图片加载失败</div>
+                                      </div>
+                                  </div>
+                                </div>`;
+            }
+            // 用户上传的图片（从文件系统加载）
+            else if (moment.imageFileIds && moment.imageCount > 0 && window.ImageStorageAPI) {
+                try {
+                    await window.ImageStorageAPI.init();
+                    const imageUrls = await window.ImageStorageAPI.getMomentImagesURLs(moment.id, moment.imageCount);
+                    if (imageUrls.length > 0) {
+                        const gridClass = `grid-${imageUrls.length}`;
+                        imageContent = `<div class="moment-images-grid ${gridClass}">`;
+                        imageUrls.forEach((imageSrc, imageIndex) => {
+                            imageContent += `<div class="moment-image-container">
+                                               <img src="${imageSrc}" class="moment-grid-image" onclick="viewImage('${imageSrc}')" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" alt="图片${imageIndex + 1}">
+                                               <div class="moment-image-error" style="display: none;">
+                                                   <div class="image-error-icon">📷</div>
+                                                   <div class="image-error-text">图片加载失败</div>
+                                               </div>
+                                             </div>`;
+                        });
+                        imageContent += '</div>';
+                    }
+                } catch (error) {
+                    console.error('加载朋友圈图片失败:', error);
+                }
+            }
+            // 兼容旧数据结构（可能是历史数据）
+            else if (moment.image || moment.images) {
+                const images = moment.images || (moment.image ? [moment.image] : []);
+                if (images.length > 0) {
+                    const gridClass = `grid-${images.length}`;
+                    imageContent = `<div class="moment-images-grid ${gridClass}">`;
+                    images.forEach((imageSrc, imageIndex) => {
+                        imageContent += `<div class="moment-image-container">
+                                           <img src="${imageSrc}" class="moment-grid-image" onclick="viewImage('${imageSrc}')" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" alt="图片${imageIndex + 1}">
+                                           <div class="moment-image-error" style="display: none;">
+                                               <div class="image-error-icon">📷</div>
+                                               <div class="image-error-text">图片加载失败</div>
+                                           </div>
+                                         </div>`;
+                    });
+                    imageContent += '</div>';
+                }
+            }
+            
+            // 处理评论内容 - 发现页面保持简洁样式
             let commentsContent = '';
             if (moment.comments && moment.comments.length > 0) {
-                commentsContent = `<div style="margin-top: 10px; padding-top: 10px; border-top: 0.5px solid #eee;">${moment.comments.map(comment => `<div style="font-size: 13px; color: #576b95; margin-bottom: 4px;"><span>${comment.author}: </span><span style="color: #333;">${comment.content}</span></div>`).join('')}</div>`;
+                const commentsList = moment.comments
+                    .filter(comment => comment.content && comment.content.trim())
+                    .map(comment => {
+                        const safeContent = comment.content.replace(/'/g, '&#39;');
+                        return `<div onclick="showMomentReplyToComment('${moment.id}', '${comment.author}')" style="font-size: 13px; color: #576b95; margin-bottom: 4px; cursor: pointer; padding: 4px; border-radius: 4px; transition: background-color 0.2s;" onmouseover="this.style.backgroundColor='#f5f5f5'" onmouseout="this.style.backgroundColor='transparent'">
+                            <span onclick="event.stopPropagation(); handleCommentAuthorClick('${comment.author}')" style="cursor: pointer; color: #576b95; font-weight: bold;">${comment.author}:</span>
+                            <span class="moment-comment">${safeContent}</span>
+                        </div>`;
+                    }).join('');
+                commentsContent = `<div style="margin-top: 10px; padding-top: 10px; border-top: 0.5px solid #eee;">${commentsList}</div>`;
             }
-            momentDiv.innerHTML = `<div class="moment-header"><div class="moment-avatar">${avatarContent}</div><div class="moment-info"><div class="moment-name">${moment.authorName}</div><div class="moment-time">${formatContactListTime(moment.time)}</div></div></div><div class="moment-content">${moment.content}</div>${imageContent}${commentsContent}`;
+            
+            // 处理点赞信息
+            const likes = moment.likes || [];
+            let likedUsers = [];
+            
+            // 获取点赞用户列表（包括独立点赞和评论点赞）
+            if (likes.length > 0) {
+                likedUsers = [...likes];
+            }
+            
+            if (moment.comments && moment.comments.length > 0) {
+                const commentLikedUsers = moment.comments
+                    .filter(comment => comment.like === true)
+                    .map(comment => comment.author)
+                    .filter(author => !likedUsers.includes(author)); // 避免重复
+                
+                likedUsers = [...likedUsers, ...commentLikedUsers];
+            }
+            
+            const likesContent = likedUsers.length > 0 ? 
+                `<div style="font-size: 13px; color: #576b95; margin-bottom: 4px;">❤️ ${likedUsers.join(', ')}</div>` : '';
+            
+            // 显示名称 - 如果是当前用户，使用最新的用户名
+            const isCurrentUser = moment.authorName === userProfile.name;
+            const displayName = isCurrentUser ? userProfile.name : moment.authorName;
+            
+            // 三点菜单按钮
+            const menuButton = `<div class="moment-menu-btn" onclick="event.stopPropagation(); toggleMomentMenu('${moment.id}')" title="更多选项">⋯</div>`;
+            
+            // 菜单内容
+            const menuContent = `
+                <div class="moment-menu" id="momentMenu-${moment.id}" style="display: none;">
+                    <div class="moment-menu-item" onclick="event.stopPropagation(); regenerateMomentImage('${moment.id}')">重新生成图片</div>
+                    <div class="moment-menu-item" onclick="event.stopPropagation(); removeMomentImage('${moment.id}')">删除图片</div>
+                    <div class="moment-menu-item" onclick="event.stopPropagation(); regenerateComments('${moment.id}')">重新生成评论</div>
+                    <div class="moment-menu-item" onclick="event.stopPropagation(); deleteMoment('${moment.id}')">删除</div>
+                </div>
+            `;
+            
+            // 创建点击头像的事件处理函数
+            const avatarClickHandler = `onclick="handleMomentAvatarClick('${moment.authorName.replace(/'/g, "\\'")}')"`;
+            
+            // 添加折叠菜单
+            const actionsMenu = `
+                <div class="moment-actions-container">
+                    <button class="moment-collapse-btn" onclick="toggleMomentActions('${moment.id}')">❤/💬</button>
+                    <div class="moment-actions-menu" id="momentActions-${moment.id}">
+                        <button class="moment-action-btn" onclick="likeMoment('${moment.id}')" title="点赞">❤</button>
+                        <button class="moment-action-btn" onclick="showMomentComment('${moment.id}')" title="评论">💬</button>
+                    </div>
+                </div>
+            `;
+            
+            momentDiv.innerHTML = `
+                <div class="moment-header" style="display: flex; align-items: flex-start; margin-bottom: 8px;">
+                    <div ${avatarClickHandler} style="cursor: pointer; margin-right: 12px; flex-shrink: 0;">${avatarContent}</div>
+                    <div style="flex: 1; min-width: 0;">
+                        <div class="moment-name" style="font-weight: 600; color: #576b95; font-size: 16px; line-height: 1.2; margin: 0;">${displayName}</div>
+                    </div>
+                    <div style="margin-left: auto;">
+                        ${menuButton}
+                        ${menuContent}
+                    </div>
+                </div>
+                <div class="moment-content">${moment.content}</div>
+                ${imageContent}
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0px;">
+                    <div class="moment-time" style="font-size: 12px; color: #999;">${formatContactListTime(moment.time)}</div>
+                    ${actionsMenu}
+                </div>
+                ${likesContent}
+                ${commentsContent}
+                <div class="moment-reply-input-container" id="momentMainReply-${moment.id}">
+                    <textarea class="moment-reply-input" placeholder="写评论..."></textarea>
+                    <div class="moment-reply-actions">
+                        <button class="moment-reply-btn moment-reply-cancel" onclick="hideMomentComment('${moment.id}')">取消</button>
+                        <button class="moment-reply-btn moment-reply-submit" onclick="submitMomentComment('${moment.id}')">发送</button>
+                    </div>
+                </div>
+            `;
             momentsList.appendChild(momentDiv);
-        });
+        }
     }
+}
+
+// 图片查看功能
+function viewImage(imageSrc) {
+    // 创建全屏图片查看器
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position: fixed; top: 0; left: 0; right: 0; bottom: 0; 
+        background: rgba(0,0,0,0.9); z-index: 10000; 
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer;
+    `;
+    
+    const img = document.createElement('img');
+    img.src = imageSrc;
+    img.style.cssText = 'max-width: 90%; max-height: 90%; object-fit: contain;';
+    
+    overlay.appendChild(img);
+    overlay.onclick = () => document.body.removeChild(overlay);
+    document.body.appendChild(overlay);
+}
+
+
+// 删除朋友圈
+async function deleteMoment(momentId) {
+    showConfirmDialog('删除确认', '确定要删除这条朋友圈吗？', async () => {
+        try {
+            // 从数组中删除
+            const momentIndex = moments.findIndex(m => m.id === momentId);
+            if (momentIndex !== -1) {
+                moments.splice(momentIndex, 1);
+                await saveDataToDB();
+                await renderMomentsList();
+                showToast('朋友圈已删除');
+            } else {
+                showToast('未找到要删除的朋友圈');
+            }
+        } catch (error) {
+            console.error('删除朋友圈失败:', error);
+            showToast('删除失败: ' + error.message);
+        }
+    });
 }
 
 // --- 音乐播放器 (懒加载) ---
@@ -3651,11 +3788,11 @@ async function initMusicPlayer() {
 
 async function loadPlaylistFromDB() {
     return new Promise((resolve, reject) => {
-        if (!isIndexedDBReady) { // 确保DB已准备好
+        if (!window.isIndexedDBReady) { // 确保DB已准备好
             reject('IndexedDB not ready');
             return;
         }
-        const transaction = db.transaction(['songs'], 'readonly');
+        const transaction = window.db.transaction(['songs'], 'readonly');
         const store = transaction.objectStore('songs');
         const request = store.getAll();
 
@@ -3707,12 +3844,12 @@ async function saveSong() {
         lyrics: lyrics
     };
 
-    if (!isIndexedDBReady) {
+    if (!window.isIndexedDBReady) {
         showToast('数据库未准备好，无法保存歌曲。');
         return;
     }
 
-    const transaction = db.transaction(['songs'], 'readwrite');
+    const transaction = window.db.transaction(['songs'], 'readwrite');
     const store = transaction.objectStore('songs');
     const request = store.add(songRecord);
 
@@ -3739,12 +3876,12 @@ async function playSong(index) {
         currentObjectUrl = null;
     }
 
-    if (!isIndexedDBReady) {
+    if (!window.isIndexedDBReady) {
         showToast('数据库未准备好，无法播放歌曲。');
         return;
     }
 
-    const transaction = db.transaction(['songs'], 'readonly');
+    const transaction = window.db.transaction(['songs'], 'readonly');
     const store = transaction.objectStore('songs');
     const request = store.get(songInfo.id);
 
@@ -3779,12 +3916,12 @@ async function deleteSong(index) {
     showConfirmDialog('删除确认', '确定要永久删除这首歌吗？', async () => {
         const songInfo = playlist[index];
         
-        if (!isIndexedDBReady) {
+        if (!window.isIndexedDBReady) {
             showToast('数据库未准备好，无法删除歌曲。');
             return;
         }
 
-        const transaction = db.transaction(['songs'], 'readwrite');
+        const transaction = window.db.transaction(['songs'], 'readwrite');
         const store = transaction.objectStore('songs');
         const request = store.delete(songInfo.id);
 
@@ -3946,11 +4083,7 @@ function clearAddForm() {
     document.getElementById('lrcFile').value = '';
 }
 
-function formatMusicTime(seconds) {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-}
+// formatMusicTime and formatTime functions moved to utils/formatUtils.js
 
 // --- UI 更新 & 交互 ---
 function updateContextIndicator() {
@@ -3962,385 +4095,715 @@ function updateContextValue(value) {
     document.getElementById('contextValue').textContent = value + '条';
 }
 
-function showToast(message) {
-    const toast = document.getElementById('toast');
-    toast.textContent = message;
-    toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 2000);
+
+// 专门用于显示上传错误的函数
+// showUploadError function moved to utils/uiUtils.js
+
+// 处理API错误的专用函数，七夕节特殊功能：所有API失败都显示重试确认对话框
+// showApiError function moved to utils/uiUtils.js
+
+// === localStorage清空功能 ===
+function showClearLocalStorageConfirmation() {
+    showModal('clearLocalStorageModal');
+    console.log('显示localStorage清空确认对话框');
 }
 
-// ========== 在这里插入下面的新代码 ==========
-
-/**
- * @description 更新加载屏幕的进度和状态
- * @param {number} percentage - 0到100的百分比
- * @param {string} text - 显示的状态文本
- */
-function updateLoadingProgress(percentage, text) {
-    const progressBar = document.getElementById('loading-progress-bar');
-    const statusText = document.getElementById('loading-status-text');
-    
-    if (progressBar) {
-        progressBar.style.width = `${Math.max(0, Math.min(100, percentage))}%`;
-    }
-    if (statusText) {
-        statusText.textContent = text;
-    }
-}
-
-/**
- * @description 隐藏加载屏幕
- */
-function hideLoadingOverlay() {
-    const overlay = document.getElementById('loading-overlay');
-    if (overlay) {
-        overlay.style.opacity = '0';
-        // 在动画结束后将其隐藏，防止遮挡
-        setTimeout(() => {
-            overlay.style.display = 'none';
-        }, 500); // 必须与 CSS 中的 transition (0.5s) 时间一致
-    }
-}
-// ========== 插入结束 ==========
-
-function showTopNotification(message) {
-    const notification = document.getElementById('topNotification');
-    notification.textContent = message;
-    notification.classList.add('show');
-    setTimeout(() => notification.classList.remove('show'), 1500);
-}
-
-/**
- * @description 显示发红包弹窗，并【强制从数据库】同步显示当前钱包余额
- */
-async function showRedPacketModal() {
-    // 步骤 1: 异步地从数据库直接获取最新的用户配置
+function executeLocalStorageClear() {
     try {
-        if (!db) {
-            console.error("数据库连接尚未准备好！");
-            showToast("数据库错误，无法获取余额");
-            // 即使数据库有问题，也尝试用内存数据作为备用方案
-            const balanceEl = document.getElementById('redPacketBalance');
-            if (balanceEl) {
-                balanceEl.textContent = `¥ ${userProfile.wallet.balance.toFixed(2)}`;
+        // 记录清空前的localStorage项目数量
+        const itemCount = localStorage.length;
+        console.log(`准备清空localStorage，当前有${itemCount}个项目`);
+        
+        // 获取所有localStorage键名（用于日志记录）
+        const allKeys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            allKeys.push(localStorage.key(i));
+        }
+        
+        console.log('localStorage清空前的所有键名:', allKeys);
+        
+        // 执行清空操作
+        localStorage.clear();
+        
+        // 关闭对话框
+        closeModal('clearLocalStorageModal');
+        
+        // 显示成功提示
+        showToast(`✅ localStorage已清空！已删除${itemCount}个项目`, 3000);
+        
+        // 记录操作到控制台
+        console.log('✅ localStorage清空操作完成', {
+            timestamp: new Date().toISOString(),
+            clearedItemsCount: itemCount,
+            clearedKeys: allKeys,
+            currentItemsCount: localStorage.length
+        });
+        
+        // 可选：延迟刷新页面让用户看到结果
+        setTimeout(() => {
+            if (confirm('localStorage已清空。是否要刷新页面以确保所有组件正确重置？')) {
+                window.location.reload();
             }
-            showModal('redPacketModal');
-            return;
-        }
-
-        // 创建一个只读事务来获取数据
-        const transaction = db.transaction(['userProfile'], 'readonly');
-        const store = transaction.objectStore('userProfile');
-        // 等待数据库查询完成
-        const latestUserProfile = await promisifyRequest(store.get('profile'));
-
-        // 步骤 2: 使用从数据库新鲜出炉的数据来更新UI
-        const balanceEl = document.getElementById('redPacketBalance');
-        if (balanceEl) {
-            // 优先使用从数据库获取的最新余额
-            const currentBalance = (latestUserProfile && latestUserProfile.wallet) 
-                ? latestUserProfile.wallet.balance 
-                : userProfile.wallet.balance; // 如果数据库没查到，则使用内存数据
-            
-            balanceEl.textContent = `¥ ${currentBalance.toFixed(2)}`;
-        }
+        }, 2000);
+        
     } catch (error) {
-        console.error("从数据库获取最新余额失败:", error);
-        showToast("获取最新余额失败，显示可能不准确");
-        // 如果查询数据库出错，仍然尝试使用内存中的数据作为后备
-        const balanceEl = document.getElementById('redPacketBalance');
-        if (balanceEl) {
-            balanceEl.textContent = `¥ ${userProfile.wallet.balance.toFixed(2)}`;
+        console.error('清空localStorage时发生错误:', error);
+        showToast(`❌ 清空失败: ${error.message}`, 3000);
+        closeModal('clearLocalStorageModal');
+    }
+}
+
+// === 七夕节特殊功能：AI空回复重试 ===
+let qixiRetryContext = null; // 存储重试上下文
+
+function showQixiRetryModal(prefixOrError, error, errorMessage, prefix) {
+    // 检查模态框元素是否存在
+    const modal = document.getElementById('qixiRetryModal');
+    if (!modal) {
+        // 如果模态框不存在，直接显示确认对话框作为fallback
+        const shouldRetry = confirm(`操作失败：${errorMessage}\n\n是否要重新尝试？`);
+        if (shouldRetry) {
+            // 保存重试上下文
+            if (typeof prefixOrError === 'string' && error) {
+                qixiRetryContext = { type: 'dual-param', prefix: prefixOrError, error: error, errorMessage, fullPrefix: prefix };
+            } else {
+                qixiRetryContext = { type: 'single-param', error: prefixOrError, errorMessage, fullPrefix: prefix };
+            }
+            handleQixiRetry();
+        }
+        return;
+    }
+    
+    // 保存重试上下文，支持单参数和双参数调用
+    if (typeof prefixOrError === 'string' && error) {
+        qixiRetryContext = { type: 'dual-param', prefix: prefixOrError, error: error, errorMessage, fullPrefix: prefix };
+    } else {
+        qixiRetryContext = { type: 'single-param', error: prefixOrError, errorMessage, fullPrefix: prefix };
+    }
+    
+    // 更新模态框中的错误信息显示
+    const errorDiv = document.querySelector('#qixiRetryModal .qixi-retry-message');
+    if (errorDiv) {
+        errorDiv.innerHTML = `
+            <p><strong>操作失败</strong></p>
+            <p>${errorMessage}</p>
+            <p>是否要重新尝试？</p>
+        `;
+    }
+    
+    showModal('qixiRetryModal');
+}
+
+async function handleQixiRetry() {
+    closeModal('qixiRetryModal');
+    
+    if (!qixiRetryContext) {
+        showToast('重试上下文丢失，请重新操作');
+        return;
+    }
+    
+    try {
+        showToast('🌹 正在重新尝试...');
+        
+        // 根据当前场景重新执行相应的操作
+        if (currentContact) {
+            // 重新发送消息
+            if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
+                showToast('请先设置API');
+                return;
+            }
+            
+            showTypingIndicator();
+            
+            try {
+                let replies;
+                if (currentContact.type === 'group') {
+                    const result = await callChatAPIWithPriority(currentContact, [], true);
+                    replies = result.replies;
+                } else {
+                    const result = await callChatAPIWithPriority(currentContact, [], true);
+                    replies = result.replies;
+                }
+                
+                hideTypingIndicator();
+                
+                if (!replies || replies.length === 0) {
+                    showToast('重试后仍未获得有效回复');
+                    return;
+                }
+                
+                // 处理AI回复
+                for (let i = 0; i < replies.length; i++) {
+                    const response = replies[i];
+                    const isLastReply = i === replies.length - 1;
+                    
+                    await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 800));
+                    
+                    let rawMessageContent = removeThinkingChain(response.content);
+                    const voiceParsed = parseVoiceMessage(rawMessageContent);
+
+                    const aiMessage = { 
+                        role: 'assistant', 
+                        content: voiceParsed.content,
+                        type: response.type, 
+                        time: new Date().toISOString(), 
+                        senderId: currentContact.id,
+                        isVoice: voiceParsed.isVoice
+                    };
+
+                    currentContact.messages.push(aiMessage);
+
+                    if (currentContact.messages.length > currentlyDisplayedMessageCount) {
+                        currentlyDisplayedMessageCount++;
+                    }
+                    
+                    await addSingleMessage(aiMessage, true);
+                    
+                    if (isLastReply) {
+                        currentContact.lastMessage = response.type === 'text' ? response.content.substring(0, 20) + '...' : (response.type === 'emoji' ? '[表情]' : '[红包]');
+                        currentContact.lastTime = formatContactListTime(new Date().toISOString());
+                        await renderContactList();
+                        await saveDataToDB();
+                    }
+                }
+                
+                showToast('重试成功');
+                
+            } catch (retryError) {
+                hideTypingIndicator();
+                console.error('重试失败:', retryError);
+                
+                showToast('重试失败: ' + retryError.message);
+            }
+        } else {
+            showToast('没有当前聊天对象，无法重试');
+        }
+        
+    } catch (error) {
+        console.error('处理重试时发生错误:', error);
+        showToast('重试过程出现错误: ' + error.message);
+    } finally {
+        // 清理重试上下文
+        qixiRetryContext = null;
+    }
+}
+
+// === 表情图片管理函数 ===
+async function renderEmojiContent(emojiContent, isInline = false) {
+    // 处理新格式 [emoji:tag]
+    if (emojiContent.startsWith('[emoji:') && emojiContent.endsWith(']')) {
+        const tag = emojiContent.slice(7, -1);
+        const imageData = await getEmojiImage(tag);
+        if (imageData) {
+            const style = isInline ? 'max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;' : '';
+            const className = isInline ? '' : 'class="message-emoji"';
+            return `<img src="${imageData}" ${className} style="${style}">`;
+        } else {
+            // 如果找不到图片，显示标签
+            return `[表情:${tag}]`;
         }
     }
     
-    // 步骤 3: (最后) 显示弹窗
-    showModal('redPacketModal');
+    // 处理旧格式的base64或URL
+    if (emojiContent.startsWith('data:image/') || emojiContent.startsWith('http')) {
+        const style = isInline ? 'max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;' : '';
+        const className = isInline ? '' : 'class="message-emoji"';
+        return `<img src="${emojiContent}" ${className} style="${style}">`;
+    }
+    
+    return emojiContent; // 返回原内容
 }
 
-function showModal(modalId) {
-    document.getElementById(modalId).style.display = 'block';
-    if (modalId === 'apiSettingsModal') {
-        const contextSlider = document.getElementById('contextSlider');
-        contextSlider.max = CONTEXT_MESSAGE_MAX;
-        contextSlider.value = apiSettings.contextMessageCount;
-        document.getElementById('contextValue').textContent = apiSettings.contextMessageCount + '条';
-        const usageStatsToggle = document.getElementById('showUsageStatsToggle');
-        if (usageStatsToggle) {
-            usageStatsToggle.checked = apiSettings.showUsageStats !== false;
+// 删除AI回复中的思维链标签
+// removeThinkingChain function moved to utils/formatUtils.js
+
+async function processTextWithInlineEmojis(textContent) {
+    const emojiTagRegex = /\[(?:emoji|发送了表情)[:：]([^\]]+)\]/g;
+    const standaloneEmojiMatch = textContent.trim().match(/^\[(?:emoji|发送了表情)[:：]([^\]]+)\]$/);
+    
+    if (standaloneEmojiMatch) {
+        // 处理独立表情消息
+        const emojiName = standaloneEmojiMatch[1];
+        const foundEmoji = emojis.find(e => e.tag === emojiName || e.meaning === emojiName);
+        if (foundEmoji && foundEmoji.tag) {
+            return await renderEmojiContent(`[emoji:${foundEmoji.tag}]`);
+        } else if (foundEmoji && foundEmoji.url) {
+            // 旧格式兼容
+            return `<img src="${foundEmoji.url}" class="message-emoji">`;
+        } else {
+            return `<div class="message-content">${textContent}</div>`;
         }
+    } else {
+        // 处理包含内联表情的文本
+        let processedContent = textContent.replace(/\n/g, '<br>');
+        
+        // 使用异步替换处理内联表情
+        const emojiMatches = [...processedContent.matchAll(emojiTagRegex)];
+        for (const match of emojiMatches) {
+            const fullMatch = match[0];
+            const emojiName = match[1];
+            const foundEmoji = emojis.find(e => e.tag === emojiName || e.meaning === emojiName);
+            
+            let replacement = fullMatch; // 默认保持原样
+            if (foundEmoji && foundEmoji.tag) {
+                const emojiHtml = await renderEmojiContent(`[emoji:${foundEmoji.tag}]`, true);
+                replacement = emojiHtml;
+            } else if (foundEmoji && foundEmoji.url) {
+                // 旧格式兼容
+                replacement = `<img src="${foundEmoji.url}" style="max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;">`;
+            }
+            
+            processedContent = processedContent.replace(fullMatch, replacement);
+        }
+        
+        return `<div class="message-content">${processedContent}</div>`;
+    }
+}
+async function saveEmojiImage(tag, base64Data) {
+    if (!window.isIndexedDBReady) {
+        console.warn('IndexedDB 未准备好，无法保存表情图片。');
+        return;
+    }
+    
+    // 如果 emojiImages 存储不存在，提示用户刷新页面
+    if (!window.db.objectStoreNames.contains('emojiImages')) {
+        console.log('检测到 emojiImages 存储不存在，需要升级数据库');
+        if (typeof showToast === 'function') {
+            showToast('检测到数据库需要升级，请刷新页面');
+        }
+        return;
+    }
+    
+    try {
+        const transaction = window.db.transaction(['emojiImages'], 'readwrite');
+        const store = transaction.objectStore('emojiImages');
+        await promisifyRequest(store.put({ tag: tag, data: base64Data }));
+    } catch (error) {
+        console.error('保存表情图片失败:', error);
+        throw error;
     }
 }
 
-function closeModal(modalId) {
-    document.getElementById(modalId).style.display = 'none';
-    if (modalId === 'addContactModal') {
-        editingContact = null;
-        document.getElementById('contactModalTitle').textContent = '添加AI助手';
-        document.getElementById('contactName').value = '';
-        document.getElementById('contactAvatar').value = '';
-        document.getElementById('contactPersonality').value = '';
-        document.getElementById('customPrompts').value = '';
-        // 重置语音ID输入框
-        document.getElementById('contactVoiceId').value = '';
-        // 重置 DeepSeek 思考模式
-        document.getElementById('contactThinkMode').value = 'default';
+async function getEmojiImage(tag) {
+    if (!window.isIndexedDBReady) {
+        console.warn('IndexedDB 未准备好，无法获取表情图片。');
+        return null;
+    }
+    
+    try {
+        // 首先尝试从新的文件存储系统获取
+        if (window.ImageStorageAPI) {
+            try {
+                await window.ImageStorageAPI.init();
+                const url = await window.ImageStorageAPI.getEmojiURL(tag);
+                if (url) {
+                    return url;
+                }
+            } catch (error) {
+                console.warn('从新文件存储获取表情失败，回退到旧系统:', error);
+            }
+        }
+        
+        // 回退到旧的 emojiImages 存储
+        if (!window.db.objectStoreNames.contains('emojiImages')) {
+            console.log('检测到 emojiImages 存储不存在，需要升级数据库');
+            if (typeof showToast === 'function') {
+                showToast('检测到数据库需要升级，请刷新页面');
+            }
+            return null;
+        }
+        
+        const transaction = window.db.transaction(['emojiImages'], 'readonly');
+        const store = transaction.objectStore('emojiImages');
+        const result = await promisifyRequest(store.get(tag));
+        return result ? result.data : null;
+        
+    } catch (error) {
+        console.error('获取表情图片失败:', error);
+        return null;
+    }
+}
+
+async function deleteEmojiImage(tag) {
+    if (!window.isIndexedDBReady) {
+        console.warn('IndexedDB 未准备好，无法删除表情图片。');
+        return;
+    }
+    
+    // 如果 emojiImages 存储不存在，提示用户刷新页面
+    if (!window.db.objectStoreNames.contains('emojiImages')) {
+        console.log('检测到 emojiImages 存储不存在，需要升级数据库');
+        if (typeof showToast === 'function') {
+            showToast('检测到数据库需要升级，请刷新页面');
+        }
+        return;
+    }
+    
+    try {
+        const transaction = window.db.transaction(['emojiImages'], 'readwrite');
+        const store = transaction.objectStore('emojiImages');
+        await promisifyRequest(store.delete(tag));
+    } catch (error) {
+        console.error('删除表情图片失败:', error);
+        throw error;
+    }
+}
+
+
+// 数据库优化函数：将现有base64表情转换为标签格式
+async function optimizeEmojiDatabase() {
+    if (!window.isIndexedDBReady) {
+        showToast('数据库未准备好，无法执行优化');
+        return;
+    }
+    
+    try {
+        showToast('开始优化数据库...');
+        let optimizedCount = 0;
+        let processedContacts = 0;
+        
+        // 处理所有联系人的消息
+        for (const contact of contacts) {
+            let contactModified = false;
+            
+            for (const message of contact.messages) {
+                // 查找包含base64图片的消息
+                if (message.content && typeof message.content === 'string') {
+                    const base64Regex = /data:image\/[^,\s]+,[A-Za-z0-9+/=]+/g;
+                    const matches = message.content.match(base64Regex);
+                    
+                    if (matches) {
+                        let newContent = message.content;
+                        
+                        for (const base64Url of matches) {
+                            // 查找对应的表情
+                            const emoji = emojis.find(e => e.url === base64Url || (e.url && e.url === base64Url));
+                            if (emoji && emoji.meaning) {
+                                // 如果还没有保存过这个表情的图片，保存到emojiImages
+                                const existingImage = await getEmojiImage(emoji.meaning);
+                                if (!existingImage) {
+                                    await saveEmojiImage(emoji.meaning, base64Url);
+                                }
+                                
+                                // 更新表情数据结构
+                                if (!emoji.tag) {
+                                    emoji.tag = emoji.meaning;
+                                }
+                                
+                                // 替换消息中的base64为标签格式
+                                newContent = newContent.replace(base64Url, `[emoji:${emoji.meaning}]`);
+                                optimizedCount++;
+                                contactModified = true;
+                            } else {
+                                // 如果找不到对应的表情，可能是独立的base64图片，创建一个临时标签
+                                const tempTag = `temp_${Date.now()}`;
+                                await saveEmojiImage(tempTag, base64Url);
+                                newContent = newContent.replace(base64Url, `[emoji:${tempTag}]`);
+                                
+                                // 创建一个新的表情记录
+                                emojis.push({
+                                    id: Date.now().toString(),
+                                    tag: tempTag,
+                                    meaning: tempTag
+                                });
+                                optimizedCount++;
+                                contactModified = true;
+                            }
+                        }
+                        
+                        // 更新消息内容
+                        message.content = newContent;
+                        
+                        // 如果消息类型是emoji，也更新类型
+                        if (message.type === 'emoji' && matches.length === 1 && newContent.trim().match(/^\[emoji:[^\]]+\]$/)) {
+                            // 这是一个纯表情消息
+                            message.content = newContent.trim();
+                        }
+                    }
+                }
+            }
+            
+            if (contactModified) {
+                processedContacts++;
+            }
+        }
+        
+        // 更新表情数据结构，移除旧的url字段
+        for (const emoji of emojis) {
+            if (emoji.url && emoji.url.startsWith('data:image/')) {
+                // 确保图片已保存到emojiImages
+                if (emoji.tag || emoji.meaning) {
+                    const tag = emoji.tag || emoji.meaning;
+                    const existingImage = await getEmojiImage(tag);
+                    if (!existingImage) {
+                        await saveEmojiImage(tag, emoji.url);
+                    }
+                    
+                    // 移除url字段
+                    delete emoji.url;
+                    
+                    // 确保有tag字段
+                    if (!emoji.tag && emoji.meaning) {
+                        emoji.tag = emoji.meaning;
+                    }
+                }
+            }
+        }
+        
+        // 保存优化后的数据
+        await saveDataToDB();
+        
+        showToast(`数据库优化完成！处理了 ${optimizedCount} 个表情，涉及 ${processedContacts} 个联系人`);
+        
+        // 刷新表情网格
+        await renderEmojiGrid();
+        
+        // 如果当前有打开的聊天，重新渲染消息
+        if (currentContact) {
+            await renderMessages(true);
+        }
+        
+    } catch (error) {
+        console.error('数据库优化失败:', error);
+        showToast(`优化失败: ${error.message}`);
+    }
+}
+
+// showTopNotification function moved to utils/uiUtils.js
+
+
+
+// 清理表情包上传临时数据的函数
+function cleanupEmojiUploadData() {
+    try {
+        // 清理临时文件
+        if (window.ImageUploadHandlers.tempEmojiFile) {
+            window.ImageUploadHandlers.tempEmojiFile = null;
+        }
+        
+        // 清理临时URL
+        const emojiUrlInput = document.getElementById('emojiUrl');
+        if (emojiUrlInput && emojiUrlInput.value.startsWith('temp:')) {
+            const tempUrl = emojiUrlInput.value.substring(5);
+            URL.revokeObjectURL(tempUrl);
+            emojiUrlInput.value = '';
+        }
+        
+        // 清理文件输入
+        const fileInput = document.getElementById('emojiUploadInput');
+        if (fileInput) {
+            fileInput.value = '';
+        }
+        
+        // 清理状态提示
+        const statusElement = document.getElementById('emojiUploadStatus');
+        if (statusElement) {
+            statusElement.textContent = '';
+            statusElement.style.color = '';
+        }
+        
+        // 清理意思输入框
+        const meaningInput = document.getElementById('emojiMeaning');
+        if (meaningInput) {
+            meaningInput.value = '';
+        }
+        
+        console.log('表情包上传临时数据已清理');
+    } catch (error) {
+        console.error('清理表情包上传数据时出错:', error);
     }
 }
 
 function showAddContactModal() {
     editingContact = null;
+    window.editingContact = null;
     document.getElementById('contactModalTitle').textContent = '添加AI助手';
-    // 清空语音ID输入框
+    
+    // 清除所有输入框和状态提示
+    document.getElementById('contactName').value = '';
+    document.getElementById('contactAvatar').value = '';
+    document.getElementById('contactPersonality').value = '';
+    document.getElementById('customPrompts').value = '';
     document.getElementById('contactVoiceId').value = '';
-    document.getElementById('contactThinkMode').value = 'default';
+    
+    // 清除文件输入和状态提示
+    const fileInput = document.getElementById('avatarUploadInput');
+    const statusElement = document.getElementById('avatarUploadStatus');
+    if (fileInput) fileInput.value = '';
+    if (statusElement) statusElement.textContent = '';
+    
     showModal('addContactModal');
 }
 
 function showEditContactModal() {
     if (!currentContact) { showToast('请先选择联系人'); return; }
     editingContact = currentContact;
+    window.editingContact = editingContact;
     document.getElementById('contactModalTitle').textContent = '编辑AI助手';
     document.getElementById('contactName').value = currentContact.name;
-    document.getElementById('contactAvatar').value = currentContact.avatar || '';
+    
+    // 处理头像显示和状态
+    const avatarInput = document.getElementById('contactAvatar');
+    const fileInput = document.getElementById('avatarUploadInput');
+    const statusElement = document.getElementById('avatarUploadStatus');
+    
+    // 设置隐藏的URL输入框
+    if (currentContact.avatarFileId) {
+        avatarInput.value = `file:${currentContact.avatarFileId}`;
+        // 显示已上传状态
+        if (statusElement) {
+            statusElement.textContent = '已上传';
+            statusElement.style.color = '#07c160';
+        }
+    } else {
+        avatarInput.value = currentContact.avatar || '';
+        // 清除状态提示
+        if (statusElement) {
+            statusElement.textContent = '';
+        }
+    }
+    
+    // 清除file input以避免显示上次的文件
+    if (fileInput) {
+        fileInput.value = '';
+    }
+    
     document.getElementById('contactPersonality').value = currentContact.personality;
     document.getElementById('customPrompts').value = currentContact.customPrompts || '';
     // 加载当前联系人的语音ID
     document.getElementById('contactVoiceId').value = currentContact.voiceId || '';
-    document.getElementById('contactThinkMode').value = currentContact.thinkMode || 'default';
-    
-    // 【新增】填充气泡样式下拉菜单
-    const styleSelect = document.getElementById('contactBubbleStyleSelect');
-    styleSelect.innerHTML = '<option value="">默认样式</option>'; // 重置
-
-    for (const styleId in bubbleStyles) {
-        const style = bubbleStyles[styleId];
-        const option = document.createElement('option');
-        option.value = style.id;
-        option.textContent = style.name;
-        styleSelect.appendChild(option);
-    }
-
-    // 设置当前联系人已选中的样式
-    styleSelect.value = currentContact.bubbleStyleId || '';
-
     showModal('addContactModal');
     toggleSettingsMenu();
 }
 
-function showApiSettingsModal() {
-    // 【修改点 3】: 加载 Minimax 的设置
-    document.getElementById('apiUrl').value = apiSettings.url;
-    document.getElementById('apiKey').value = apiSettings.key;
-    document.getElementById('apiTimeout').value = apiSettings.timeout || 60;
-    // 假设你的HTML中输入框的ID是 minimaxGroupId 和 minimaxApiKey
-    document.getElementById('minimaxGroupId').value = apiSettings.minimaxGroupId;
-    document.getElementById('minimaxApiKey').value = apiSettings.minimaxApiKey;
+// API加载等待相关变量
+let apiLoadingTimerId = null;
+let apiLoadingStartTime = null;
+let apiLoadingCancelled = false;
+
+// 显示API加载等待框
+function showApiLoadingModal() {
+    apiLoadingCancelled = false;
+    apiLoadingStartTime = Date.now();
+    showModal('apiLoadingModal');
     
-    // 【新增】加载智谱 GLM API Key
-    document.getElementById('glmApiKey').value = apiSettings.glmApiKey || '';
-
-    // 计费标准回显（元/百万Token）
-    const priceHitEl = document.getElementById('priceHit');
-    const priceMissEl = document.getElementById('priceMiss');
-    const priceOutEl = document.getElementById('priceOut');
-    if (priceHitEl) priceHitEl.value = apiSettings.priceHit ?? 1.0;
-    if (priceMissEl) priceMissEl.value = apiSettings.priceMiss ?? 12.0;
-    if (priceOutEl) priceOutEl.value = apiSettings.priceOut ?? 24.0;
-
-    const primarySelect = document.getElementById('primaryModelSelect');
-    const secondarySelect = document.getElementById('secondaryModelSelect');
-
-    // 重置并填充
-    primarySelect.innerHTML = '<option value="">请先测试连接</option>';
-    secondarySelect.innerHTML = '<option value="sync_with_primary">与主模型保持一致</option>';
+    // 开始倒计时
+    apiLoadingTimerId = setInterval(() => {
+        if (apiLoadingCancelled) {
+            clearInterval(apiLoadingTimerId);
+            return;
+        }
+        
+        const elapsed = Math.floor((Date.now() - apiLoadingStartTime) / 1000);
+        const countdownElement = document.getElementById('loadingCountdown');
+        if (countdownElement) {
+            countdownElement.textContent = elapsed + 's';
+        }
+    }, 1000);
 }
 
-function showBubbleManagerModal() {
-    renderBubbleManagerList(); // 每次打开时都重新渲染列表
-    showModal('bubbleManagerModal');
-}
-
-/**
- * @description 渲染气泡样式管理器中的列表
- */
-function renderBubbleManagerList() {
-    const listContainer = document.getElementById('bubbleManagerList');
-    listContainer.innerHTML = ''; // 清空现有列表
-
-    // Object.values() 将样式对象转换为数组，方便遍历
-    const styles = Object.values(bubbleStyles);
-
-    if (styles.length === 0) {
-        listContainer.innerHTML = `
-            <div class="bubble-manager-empty">
-                还没有自定义样式，快去"气泡设计器"创建一个吧！
-            </div>
-        `;
-        return;
+// 隐藏API加载等待框
+function hideApiLoadingModal() {
+    if (apiLoadingTimerId) {
+        clearInterval(apiLoadingTimerId);
+        apiLoadingTimerId = null;
     }
+    closeModal('apiLoadingModal');
+}
 
-    styles.forEach(style => {
-        const item = document.createElement('div');
-        item.className = 'bubble-manager-item';
-        item.innerHTML = `
-            <div class="bubble-manager-item-name">${style.name}</div>
-            <div class="bubble-manager-item-actions">
-                <button class="bubble-manager-btn export-btn" onclick="exportBubbleStyle('${style.id}')">导出</button>
-                <button class="bubble-manager-btn delete-btn" onclick="deleteBubbleStyle('${style.id}')">删除</button>
-            </div>
-        `;
-        listContainer.appendChild(item);
+// 取消API加载
+function cancelApiLoading() {
+    apiLoadingCancelled = true;
+    hideApiLoadingModal();
+    showToast('已取消模型加载');
+}
+
+async function showApiSettingsModal() {
+    try {
+        console.log('显示API配置管理模态框');
+        
+        // 显示等待提示框
+        showApiLoadingModal();
+        
+        try {
+            // 初始化配置选择器
+            await loadConfigSelector();
+            
+            // 检查是否被取消
+            if (apiLoadingCancelled) return;
+            
+            // 加载当前配置到表单
+            await loadCurrentConfigToForm();
+            
+            // 检查是否被取消
+            if (apiLoadingCancelled) return;
+            
+            // 加载模型选择器的API配置列表
+            await loadApiConfigSelectorsForModels();
+            
+            // 检查是否被取消
+            if (apiLoadingCancelled) return;
+            
+        } finally {
+            // 无论成功还是失败都要隐藏等待框
+            hideApiLoadingModal();
+        }
+        
+        // 只有在没有被取消时才显示API设置模态框
+        if (!apiLoadingCancelled) {
+            showModal('apiSettingsModal');
+            console.log('API设置模态框已显示');
+            
+            // 确保API key状态正确显示
+            setTimeout(() => {
+                updateAllKeyStates();
+                // 更新UI提示状态
+                updateUIHintStatus();
+            }, 200); // 延迟确保DOM已完全渲染
+        }
+        
+    } catch (error) {
+        console.error('显示API设置模态框失败:', error);
+        hideApiLoadingModal();
+        showToast('打开设置失败: ' + error.message);
+    }
+}
+
+// 确保函数在全局作用域可用
+window.showApiSettingsModal = showApiSettingsModal;
+
+// 添加API设置按钮事件监听器（安全的延迟绑定）
+document.addEventListener('DOMContentLoaded', function() {
+    const apiSettingsIcon = document.getElementById('apiSettingsIcon');
+    if (apiSettingsIcon) {
+        apiSettingsIcon.addEventListener('click', showApiSettingsModal);
+        apiSettingsIcon.setAttribute('data-umami-event', 'API Settings Open');
+    }
+});
+
+function showBackgroundModal() {
+    // 异步包装函数
+    showBackgroundModalAsync().catch(error => {
+        console.error('显示背景设置界面错误:', error);
     });
 }
 
-/**
- * @description 处理导入的气泡样式JSON文件
- */
-function importBubbleStyles(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-        try {
-            const importedStyle = JSON.parse(e.target.result);
-
-            // 简单的格式验证
-            if (importedStyle.id && importedStyle.name && importedStyle.html !== undefined && importedStyle.css !== undefined) {
-                bubbleStyles[importedStyle.id] = importedStyle; // 添加或覆盖样式
-                await saveBubbleStylesToDB(); // 保存到数据库
-                renderBubbleManagerList(); // 刷新列表
-                showToast(`样式 "${importedStyle.name}" 已成功导入！`);
-            } else {
-                throw new Error('JSON文件格式不正确，缺少必要的字段。');
-            }
-        } catch (error) {
-            console.error('导入气泡样式失败:', error);
-            showToast(`导入失败: ${error.message}`);
-        }
-    };
-    reader.readAsText(file);
-
-    // 清空file input，以便下次可以选择同一个文件
-    event.target.value = '';
-}
-
-/**
- * @description 导出指定的气泡样式为JSON文件 (适配App环境)
- * @param {string} styleId - 要导出的样式ID
- */
-function exportBubbleStyle(styleId) {
-    const style = bubbleStyles[styleId];
-    if (!style) {
-        showToast('找不到要导出的样式');
-        return;
-    }
-
-    const jsonString = JSON.stringify(style, null, 2);
-    const filename = `${style.name.replace(/[/\\?%*:|"<>]/g, '-')}.json`;
-
-    // 【核心改动】检查是否存在原生安卓接口
-    if (window.Android && typeof window.Android.saveFile === 'function') {
-        // 如果存在，就调用原生接口保存文件
-        window.Android.saveFile(jsonString, filename);
-        // Java代码会显示Toast，JS端无需操作
-    } else {
-        // 如果不存在，则执行原来的Web下载逻辑（作为备用方案）
-        const blob = new Blob([jsonString], { type: 'application/json' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(a.href);
-        showToast(`样式 "${style.name}" 已开始下载。`);
-    }
-}
-
-/**
- * @description 删除指定的气泡样式
- * @param {string} styleId - 要删除的样式ID
- */
-function deleteBubbleStyle(styleId) {
-    const style = bubbleStyles[styleId];
-    if (!style) {
-        showToast('找不到要删除的样式');
-        return;
-    }
-
-    showConfirmDialog(
-        '删除确认',
-        `确定要永久删除样式 "${style.name}" 吗？此操作不可撤销。`,
-        async () => {
-            delete bubbleStyles[styleId]; // 从内存中删除
-            await saveBubbleStylesToDB(); // 更新数据库
-            renderBubbleManagerList();    // 刷新UI
-            showToast(`样式 "${style.name}" 已被删除。`);
-        }
-    );
-}
-
-// ================== 已移除预加载自定义模型的代码 ==================
-// 现在由 testApiConnection 函数负责加载和合并API返回的模型列表和自定义模型列表
-
-// ========== 在这里插入下面的新代码 ==========
-// 在显示弹窗时，为"检查"按钮绑定点击事件
-// 使用一个标记来防止重复绑定
-function bindApiCheckButton() {
-    // ▼▼▼ 将复制的代码粘贴到这里 ▼▼▼
-    document.getElementById('apiUrl').value = apiSettings.url;
-    document.getElementById('apiKey').value = apiSettings.key;
-    document.getElementById('apiTimeout').value = apiSettings.timeout || 60;
-    document.getElementById('minimaxGroupId').value = apiSettings.minimaxGroupId;
-    document.getElementById('minimaxApiKey').value = apiSettings.minimaxApiKey;
-    document.getElementById('glmApiKey').value = apiSettings.glmApiKey || '';
-
-    // 计费标准回显（元/百万Token）
-    const priceHitEl = document.getElementById('priceHit');
-    const priceMissEl = document.getElementById('priceMiss');
-    const priceOutEl = document.getElementById('priceOut');
-    if (priceHitEl) priceHitEl.value = apiSettings.priceHit ?? 1.0;
-    if (priceMissEl) priceMissEl.value = apiSettings.priceMiss ?? 12.0;
-    if (priceOutEl) priceOutEl.value = apiSettings.priceOut ?? 24.0;
-
-    const primarySelect = document.getElementById('primaryModelSelect');
-    const secondarySelect = document.getElementById('secondaryModelSelect');
-
-    primarySelect.innerHTML = '<option value="">请先测试连接</option>';
-    secondarySelect.innerHTML = '<option value="sync_with_primary">与主模型保持一致</option>';
-    // ▲▲▲ 粘贴区域结束 ▲▲▲
-
-    const checkBtn = document.getElementById('checkModelBtn');
-    if (checkBtn && !checkBtn.dataset.listenerAttached) {
-        checkBtn.addEventListener('click', checkManualModel);
-        checkBtn.dataset.listenerAttached = 'true';
-    }
-    
-    // 如果已有设置，则自动尝试获取模型列表
-    if (apiSettings.url && apiSettings.key) {
-        // 临时显示已保存的选项
-        if (apiSettings.model) {
-            primarySelect.innerHTML = `<option value="${apiSettings.model}">${apiSettings.model}</option>`;
-        }
-        if (apiSettings.secondaryModel && apiSettings.secondaryModel !== 'sync_with_primary') {
-             secondarySelect.innerHTML = `
-                <option value="sync_with_primary">与主模型保持一致</option>
-                <option value="${apiSettings.secondaryModel}">${apiSettings.secondaryModel}</option>`;
-        }
-        testApiConnection(); // 自动测试连接并填充列表
-    }
-    
-    // 确保在显示模态框时绑定事件
-    primarySelect.onchange = handlePrimaryModelChange;
-
-    showModal('apiSettingsModal');
-}
-
-function showBackgroundModal() {
+async function showBackgroundModalAsync() {
     if (!currentContact) { showToast('请先选择联系人'); return; }
-    document.getElementById('backgroundUrl').value = backgrounds[currentContact.id] || '';
+    
+    // 处理背景URL显示
+    let displayUrl = '';
+    const backgroundUrl = backgrounds[currentContact.id];
+    if (backgroundUrl) {
+        if (backgroundUrl.startsWith('file:')) {
+            // 如果是新的文件存储格式，显示文件存储标识
+            displayUrl = '(已使用文件存储)';
+        } else {
+            displayUrl = backgroundUrl;
+        }
+    }
+    
+    document.getElementById('backgroundUrl').value = displayUrl;
     showModal('backgroundModal');
     toggleSettingsMenu();
 }
@@ -4350,85 +4813,131 @@ function showAddEmojiModal() {
     toggleEmojiPanel(true);
 }
 
+function showRedPacketModal() {
+    showModal('redPacketModal');
+}
 
 function showEditProfileModal() {
     document.getElementById('profileNameInput').value = userProfile.name;
-    document.getElementById('profileAvatarInput').value = userProfile.avatar || '';
-    document.getElementById('profilePersonality').value = userProfile.personality || '';
     
-    // ========== 下方是新增的代码 ==========
-    // 1. 获取为用户新增的气泡样式选择器
-    const styleSelect = document.getElementById('profileBubbleStyleSelect');
-    styleSelect.innerHTML = '<option value="">默认样式</option>'; // 重置并保留默认选项
-
-    // 2. 遍历所有已保存的气泡样式，并创建<option>元素
-    for (const styleId in bubbleStyles) {
-        const style = bubbleStyles[styleId];
-        const option = document.createElement('option');
-        option.value = style.id;
-        option.textContent = style.name;
-        styleSelect.appendChild(option);
+    // 处理头像显示和状态
+    const avatarInput = document.getElementById('profileAvatarInput');
+    const fileInput = document.getElementById('profileUploadInput');
+    const statusElement = document.getElementById('profileUploadStatus');
+    
+    // 设置隐藏的URL输入框
+    if (userProfile.avatarFileId) {
+        avatarInput.value = `file:${userProfile.avatarFileId}`;
+        // 显示已上传状态
+        if (statusElement) {
+            statusElement.textContent = '已上传';
+            statusElement.style.color = '#07c160';
+        }
+    } else {
+        avatarInput.value = userProfile.avatar || '';
+        // 清除状态提示
+        if (statusElement) {
+            statusElement.textContent = '';
+        }
     }
-
-    // 3. 设置下拉菜单的当前值为用户已保存的样式ID
-    styleSelect.value = userProfile.bubbleStyleId || '';
-    // ========== 新增代码结束 ==========
-
+    
+    // 清除file input以避免显示上次的文件
+    if (fileInput) {
+        fileInput.value = '';
+    }
+    
+    document.getElementById('profilePersonality').value = userProfile.personality || '';
     showModal('editProfileModal');
 }
 
 function showCreateGroupModal() {
+    // 异步包装函数
+    showCreateGroupModalAsync().catch(error => {
+        console.error('显示群聊创建界面错误:', error);
+    });
+}
+
+async function showCreateGroupModalAsync() {
     const memberList = document.getElementById('groupMemberList');
     memberList.innerHTML = '';
-    contacts.forEach(contact => {
+    
+    for (const contact of contacts) {
         if (contact.type !== 'group') {
             const item = document.createElement('div');
             item.className = 'group-member-item';
-            item.innerHTML = `<div class="group-member-avatar">${contact.avatar ? `<img src="${contact.avatar}">` : contact.name[0]}</div><div class="group-member-name">${contact.name}</div><div class="group-member-checkbox">✓</div>`;
+            
+            const avatarHTML = await getAvatarHTML(contact, 'contact') || contact.name[0];
+            item.innerHTML = `<div class="group-member-avatar">${avatarHTML}</div><div class="group-member-name">${contact.name}</div><div class="group-member-checkbox">✓</div>`;
             item.onclick = () => {
                 item.classList.toggle('selected');
                 item.querySelector('.group-member-checkbox').classList.toggle('selected');
             };
             memberList.appendChild(item);
         }
-    });
+    }
     showModal('createGroupModal');
 }
 
 // --- 数据保存与处理 ---
 async function saveContact(event) {
     event.preventDefault();
+    const avatarValue = document.getElementById('contactAvatar').value;
+    
+    // 处理头像数据：如果是新的fileId格式，分别保存到avatar和avatarFileId字段
     const contactData = {
         name: document.getElementById('contactName').value,
-        avatar: document.getElementById('contactAvatar').value,
         personality: document.getElementById('contactPersonality').value,
         customPrompts: document.getElementById('customPrompts').value,
         // 保存语音ID
-        voiceId: document.getElementById('contactVoiceId').value.trim(),
-        // 保存 DeepSeek 思考模式
-        thinkMode: document.getElementById('contactThinkMode').value || 'default',
-        // 【新增】保存选择的气泡样式ID
-        bubbleStyleId: document.getElementById('contactBubbleStyleSelect').value
+        voiceId: document.getElementById('contactVoiceId').value.trim()
     };
+    
+    // 处理头像字段
+    if (avatarValue.startsWith('file:')) {
+        // 新的fileSystem格式
+        contactData.avatarFileId = avatarValue.substring(5); // 移除 "file:" 前缀
+        // 保留原avatar字段为空或删除，确保向后兼容
+        contactData.avatar = '';
+    } else {
+        // 传统的URL或base64格式
+        contactData.avatar = avatarValue;
+        // 清除可能存在的avatarFileId
+        contactData.avatarFileId = null;
+    }
     if (editingContact) {
         Object.assign(editingContact, contactData);
         showToast('修改成功');
     } else {
-        const contact = { id: Date.now().toString(), ...contactData, isPinned: false, messages: [], lastMessage: '点击开始聊天', lastTime: new Date().toISOString(), type: 'private', memoryTableContent: defaultMemoryTable, worldBook: [] };
+        const contact = { 
+            id: Date.now().toString(), 
+            ...contactData, 
+            messages: [], 
+            lastMessage: '点击开始聊天', 
+            lastTime: formatContactListTime(new Date().toISOString()), 
+            type: 'private', 
+            memoryTableContent: defaultMemoryTable,
+            // 互动界面相关字段
+            interactiveBackgroundFileId: '',
+            touchZones: [],
+            theme: 'theme-pink-white',
+            ttsEnabled: false,
+            diaryEntries: {},
+            interactiveChatHistory: []
+        };
         contacts.unshift(contact);
         showToast('添加成功');
     }
-    if (editingContact) {
-        // 如果是编辑模式，更新当前联系人
-        await updateContactInDB(editingContact);
-    } else {
-        // 如果是新建模式，获取我们刚刚添加到内存列表中的新联系人并保存它
-        const newContact = contacts[0]; // unshift() 把它放在了数组最前面
-        await updateContactInDB(newContact);
+    await saveDataToDB(); // 使用IndexedDB保存
+    await renderContactList();
+    if (editingContact && currentContact && editingContact.id === currentContact.id) {
+        await renderMessages(false);
     }
-
-    renderContactList();
     closeModal('addContactModal');
+    
+    // 清理自定义状态提示
+    const statusElement = document.getElementById('avatarUploadStatus');
+    if (statusElement) statusElement.textContent = '';
+    
     event.target.reset();
 }
 
@@ -4444,13 +4953,10 @@ async function createGroup(event) {
         const contact = contacts.find(c => c.name === name && c.type === 'private');
         if (contact) memberIds.push(contact.id);
     });
-    const group = { id: 'group_' + Date.now().toString(), name: groupName, members: memberIds, isPinned: false, messages: [], lastMessage: '群聊已创建', lastTime: new Date().toISOString(), type: 'group', memoryTableContent: defaultMemoryTable, worldBook: [] };
+    const group = { id: 'group_' + Date.now().toString(), name: groupName, members: memberIds, messages: [], lastMessage: '群聊已创建', lastTime: formatContactListTime(new Date().toISOString()), type: 'group', memoryTableContent: defaultMemoryTable };
     contacts.unshift(group);
-    // 获取我们刚刚创建并添加到内存列表中的新群聊
-    const newGroup = contacts[0]; // unshift() 同样把它放在了最前面
-    await updateContactInDB(newGroup); // 调用正确的函数来保存这个新群聊
-
-    renderContactList();
+    await saveDataToDB(); // 使用IndexedDB保存
+    await renderContactList();
     closeModal('createGroupModal');
     showToast('群聊创建成功');
 }
@@ -4473,128 +4979,71 @@ function importPrompts(event) {
 
 async function saveProfile(event) {
     event.preventDefault();
+    const avatarValue = document.getElementById('profileAvatarInput').value;
+    
     userProfile.name = document.getElementById('profileNameInput').value;
-    userProfile.avatar = document.getElementById('profileAvatarInput').value;
     userProfile.personality = document.getElementById('profilePersonality').value;
-
-    // 【新增】保存用户选择的气泡样式ID
-    userProfile.bubbleStyleId = document.getElementById('profileBubbleStyleSelect').value;
-
+    
+    // 处理头像字段
+    if (avatarValue.startsWith('file:')) {
+        // 新的fileSystem格式
+        userProfile.avatarFileId = avatarValue.substring(5); // 移除 "file:" 前缀
+        // 保留原avatar字段为空，确保向后兼容
+        userProfile.avatar = '';
+    } else {
+        // 传统的URL或base64格式
+        userProfile.avatar = avatarValue;
+        // 清除可能存在的avatarFileId
+        userProfile.avatarFileId = null;
+    }
+    
     await saveDataToDB(); // 使用IndexedDB保存
-    updateUserProfileUI();
+    await updateUserProfileUI();
+    
+    // 清理自定义状态提示
+    const statusElement = document.getElementById('profileUploadStatus');
+    if (statusElement) statusElement.textContent = '';
+    
     closeModal('editProfileModal');
     showToast('保存成功');
 }
 
-function updateUserProfileUI() {
+async function updateUserProfileUI() {
     const userAvatar = document.getElementById('userAvatar');
     const userName = document.getElementById('userName');
     userName.textContent = userProfile.name;
-    userAvatar.innerHTML = userProfile.avatar ? `<img src="${userProfile.avatar}">` : (userProfile.name[0] || '我');
+    
+    // 使用getAvatarHTML支持文件存储
+    const avatarHTML = await getAvatarHTML(userProfile, 'user');
+    userAvatar.innerHTML = avatarHTML || (userProfile.name[0] || '我');
 }
 
-/**
- * 切换联系人或群聊的置顶状态
- * @param {string} contactId - 要操作的联系人ID
- */
-async function togglePinContact(contactId) {
-    const contact = contacts.find(c => c.id === contactId);
-    if (contact) {
-        contact.isPinned = !contact.isPinned; // 切换置顶状态 (true -> false, false -> true)
-        await saveDataToDB(); // 保存更改到数据库
-        renderContactList(); // 重新渲染列表以反映排序和样式的变化
-        showToast(contact.isPinned ? '已置顶' : '已取消置顶'); // 给出用户反馈
-    }
-}
-
-/**
- * 显示联系人操作菜单 (置顶/删除)
- * @param {object} contact - 被长按的联系人对象
- */
-function showContactActionMenu(contact) {
-    const menuId = 'contactActionMenu';
-    let menu = document.getElementById(menuId);
-
-    // 如果菜单不存在，则动态创建它
-    if (!menu) {
-        menu = document.createElement('div');
-        menu.id = menuId;
-        menu.className = 'modal'; // 复用现有的 modal 样式作为遮罩层
-        menu.innerHTML = `
-            <div class="modal-content">
-                <div class="modal-body" style="padding: 10px 0;">
-                    <div class="menu-item" id="pinContactBtn"></div>
-                    <div class="menu-item delete-item" id="deleteContactBtn"></div>
-                </div>
-                <div style="padding: 10px; border-top: 8px solid #f0f0f0;">
-                     <button class="form-submit" style="background-color: #f7f7f7; color: #333;" onclick="closeModal('${menuId}')">取消</button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(menu);
-
-        // 点击菜单外部的遮罩层时关闭菜单
-        menu.addEventListener('click', (e) => {
-            if (e.target.id === menuId) {
-                closeModal(menuId);
-            }
-        });
-    }
-
-    // 根据联系人的当前状态，动态设置按钮的文本和行为
-    const pinBtn = document.getElementById('pinContactBtn');
-    const deleteBtn = document.getElementById('deleteContactBtn');
-
-    pinBtn.textContent = contact.isPinned ? '取消置顶' : '置顶该聊天';
-    pinBtn.onclick = () => {
-        togglePinContact(contact.id);
-        closeModal(menuId);
-    };
-
-    deleteBtn.textContent = `删除该聊天`;
-    deleteBtn.onclick = () => {
-        closeModal(menuId);
-        // 复用已有的删除确认对话框
-        showConfirmDialog('删除确认', `确定要删除 "${contact.name}" 吗？此操作不可撤销。`, () => {
-            deleteContact(contact.id);
-        });
-    };
-
-    showModal(menuId); // 显示菜单
-}
-
-function renderContactList() {
+async function renderContactList() {
     const contactList = document.getElementById('contactList');
     contactList.innerHTML = '';
-
-    // 【核心修改1】: 在渲染前对联系人数组进行排序
-    contacts.sort((a, b) => {
-        // 如果 a 置顶而 b 没有，a 排在前面
-        if (a.isPinned && !b.isPinned) return -1;
-        // 如果 b 置顶而 a 没有，b 排在前面
-        if (!a.isPinned && b.isPinned) return 1;
-        // 如果两者都置顶或都不置顶，则按最后消息时间排序
-        return new Date(b.lastTime) - new Date(a.lastTime);
-    });
-
-    contacts.forEach(contact => {
+    
+    for (const contact of contacts) {
         const item = document.createElement('div');
-        // 【核心修改2】: 根据 isPinned 状态添加 'pinned' 类
-        item.className = `contact-item ${contact.isPinned ? 'pinned' : ''}`;
-
+        item.className = 'contact-item';
+        item.setAttribute('data-contact-id', contact.id);
+        
         if (contact.type === 'group') {
-            item.innerHTML = `<div class="group-avatar"><div class="group-avatar-inner">${getGroupAvatarContent(contact)}</div></div><div class="contact-info"><div class="contact-name">${contact.name}</div><div class="contact-message">${contact.lastMessage}</div></div><div class="contact-time">${formatContactListTime(contact.lastTime)}</div>`;
+            const groupAvatarContent = await getGroupAvatarContent(contact);
+            item.innerHTML = `<div class="group-avatar"><div class="group-avatar-inner">${groupAvatarContent}</div></div><div class="contact-info"><div class="contact-name">${contact.name}</div><div class="contact-message">${contact.lastMessage}</div></div><div class="contact-time">${contact.lastTime}</div>`;
         } else {
-            item.innerHTML = `<div class="contact-avatar">${contact.avatar ? `<img src="${contact.avatar}">` : contact.name[0]}</div><div class="contact-info"><div class="contact-name">${contact.name}</div><div class="contact-message">${contact.lastMessage}</div></div><div class="contact-time">${formatContactListTime(contact.lastTime)}</div>`;
+            // 使用异步版本支持文件存储
+            const avatarHTML = await getAvatarHTML(contact, 'contact');
+            item.innerHTML = `<div class="contact-avatar">${avatarHTML || contact.name[0]}</div><div class="contact-info"><div class="contact-name">${contact.name}</div><div class="contact-message">${contact.lastMessage}</div></div><div class="contact-time">${contact.lastTime}</div>`;
         }
         item.onclick = () => openChat(contact);
 
-        // 【核心修改3】: 绑定新的长按/右键菜单事件
+        // 添加长按事件监听器来删除联系人/群聊
         let pressTimer;
-        // 移动端长按
         item.addEventListener('touchstart', () => {
             pressTimer = setTimeout(() => {
-                showContactActionMenu(contact);
+                showConfirmDialog('删除确认', `确定要删除 "${contact.name}" 吗？此操作不可撤销。`, () => {
+                    deleteContact(contact.id);
+                });
             }, 700); // 长按700毫秒触发
         });
         item.addEventListener('touchend', () => {
@@ -4603,23 +5052,74 @@ function renderContactList() {
         item.addEventListener('touchmove', () => {
             clearTimeout(pressTimer);
         });
-        // PC端右键
+        // 对于非触摸设备，也可以添加右键菜单
         item.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            showContactActionMenu(contact);
+            showConfirmDialog('删除确认', `确定要删除 "${contact.name}" 吗？此操作不可撤销。`, () => {
+                deleteContact(contact.id);
+            });
         });
 
         contactList.appendChild(item);
-    });
+    }
 }
 
-function getGroupAvatarContent(group) {
+/**
+ * 更新联系人列表的时间显示
+ * 每分钟调用一次，重新计算相对时间
+ * 使用直接DOM更新，避免重新渲染整个列表
+ */
+function updateContactListTimes() {
+    // 检查是否在联系人列表页面
+    const contactListPage = document.getElementById('contactListPage');
+    if (!contactListPage || !contactListPage.classList.contains('active')) {
+        return; // 如果不在联系人列表页面，直接返回
+    }
+    
+    let updateCount = 0;
+    
+    // 更新每个联系人的时间显示
+    contacts.forEach(contact => {
+        if (contact.messages && contact.messages.length > 0) {
+            const lastMsg = contact.messages[contact.messages.length - 1];
+            const newTime = formatContactListTime(lastMsg.time);
+            
+            // 只有时间显示真的改变了才更新DOM
+            if (contact.lastTime !== newTime) {
+                contact.lastTime = newTime;
+                
+                // 找到对应的DOM元素并直接更新时间显示
+                const contactItem = document.querySelector(`[data-contact-id="${contact.id}"]`);
+                if (contactItem) {
+                    const timeElement = contactItem.querySelector('.contact-time');
+                    if (timeElement) {
+                        timeElement.textContent = newTime;
+                        updateCount++;
+                    }
+                }
+            }
+        }
+    });
+    
+}
+
+/**
+ * 启动联系人时间定时更新器
+ */
+function startContactTimeUpdater() {
+    // 每分钟更新一次时间显示
+    setInterval(updateContactListTimes, 60000); // 60秒 = 1分钟
+}
+
+async function getGroupAvatarContent(group) {
     const memberAvatars = group.members.slice(0, 4).map(id => contacts.find(c => c.id === id)).filter(Boolean);
     let avatarContent = '';
+    
     for (let i = 0; i < 4; i++) {
         if (i < memberAvatars.length) {
             const member = memberAvatars[i];
-            avatarContent += `<div class="group-avatar-item">${member.avatar ? `<img src="${member.avatar}">` : member.name[0]}</div>`;
+            const avatarHTML = await getAvatarHTML(member, 'contact');
+            avatarContent += `<div class="group-avatar-item">${avatarHTML || member.name[0]}</div>`;
         } else {
             avatarContent += `<div class="group-avatar-item"></div>`;
         }
@@ -4628,39 +5128,78 @@ function getGroupAvatarContent(group) {
 }
 
 // --- 聊天核心逻辑 ---
-// 【已重构】现在是异步函数，会从数据库加载消息
 async function openChat(contact) {
-    // 1. 更新当前联系人（不含消息的摘要对象）
+    // 确保从数据库获取最新的联系人数据，解决voiceId同步问题
+    try {
+        const dbContact = await ensureDBReady(async () => {
+            const transaction = window.db.transaction(['contacts'], 'readonly');
+            const store = transaction.objectStore('contacts');
+
+            return await promisifyRequest(store.get(contact.id), '获取联系人数据');
+        }, '获取联系人数据');
+        
+        // 同步voiceId和其他字段到内存对象
+        if (dbContact) {
+            const fieldsToSync = ['voiceId', 'personality', 'customPrompts'];
+            let syncedFields = [];
+            
+            for (const field of fieldsToSync) {
+                if (dbContact[field] !== contact[field]) {
+                    contact[field] = dbContact[field];
+                    syncedFields.push(field);
+                }
+            }
+            
+        }
+    } catch (error) {
+        console.error('[openChat] 数据库同步失败，使用内存数据:', error);
+    }
+    
     currentContact = contact;
+    window.currentContact = contact;
     window.memoryTableManager.setCurrentContact(contact);
     document.getElementById('chatTitle').textContent = contact.name;
     showPage('chatPage');
     
-    // 2. 显示加载状态
-    const chatMessagesEl = document.getElementById('chatMessages');
-    chatMessagesEl.innerHTML = '<div class="loading-text">正在加载聊天记录...</div>';
+    // 重置消息加载状态
+    currentlyDisplayedMessageCount = 0; 
     
-    // 3. 异步从数据库获取完整的联系人数据（包含所有消息）
-    const fullContactData = await getFullContactFromDB(contact.id);
-    if (!fullContactData) {
-        chatMessagesEl.innerHTML = '<div class="loading-text">加载失败，找不到聊天记录。</div>';
-        return;
-    }
-    // 将完整的消息数组附加到我们当前的联系人对象上
-    currentContact.messages = fullContactData.messages || [];
-    // 确保世界书数据也准备好了
-    currentContact.worldBook = fullContactData.worldBook || [];
-
-    // 4. 重置分页状态并进行初次渲染
-    isLoadingMoreMessages = false;
-    currentlyDisplayedMessageCount = Math.min(currentContact.messages.length, MESSAGES_PER_PAGE);
+    // 检查并加载最新的气泡样式（每次进入聊天都检查）
+    await loadCustomBubbleStyle();
     
-    await renderMessages(true); // 使用 await 等待异步渲染完成
+    await renderMessages(true); // 初始加载
     
-    // 5. 设置背景和滚动监听
     updateContextIndicator();
-    chatMessagesEl.style.backgroundImage = backgrounds[contact.id] ? `url(${backgrounds[contact.id]})` : 'none';
+    const chatMessagesEl = document.getElementById('chatMessages');
+    // 处理背景图片 - 支持新的文件存储系统
+    if (backgrounds[contact.id]) {
+        const backgroundUrl = backgrounds[contact.id];
+        if (backgroundUrl.startsWith('file:')) {
+            // 新的文件存储格式: file:fileId
+            const fileId = backgroundUrl.substring(5); // 移除 'file:' 前缀
+            if (window.ImageStorageAPI) {
+                try {
+                    await window.ImageStorageAPI.init();
+                    const url = await window.ImageStorageAPI.getBackgroundURL(contact.id);
+                    chatMessagesEl.style.backgroundImage = `url(${url})`;
+                } catch (error) {
+                    console.warn('获取背景图片失败:', error);
+                    chatMessagesEl.style.backgroundImage = 'none';
+                }
+            } else {
+                chatMessagesEl.style.backgroundImage = 'none';
+            }
+        } else {
+            // 旧格式 - 直接使用URL
+            chatMessagesEl.style.backgroundImage = `url(${backgroundUrl})`;
+        }
+    } else {
+        chatMessagesEl.style.backgroundImage = 'none';
+    }
     
+    // 移除旧的监听器
+    chatMessagesEl.onscroll = null; 
+    // 添加新的滚动监听器
     chatMessagesEl.onscroll = () => {
         if (chatMessagesEl.scrollTop === 0 && !isLoadingMoreMessages && currentContact.messages.length > currentlyDisplayedMessageCount) {
             loadMoreMessages();
@@ -4677,243 +5216,292 @@ function closeChatPage() {
     const chatMessagesEl = document.getElementById('chatMessages');
     chatMessagesEl.onscroll = null; // 移除监听器
     currentContact = null;
+    window.currentContact = null;
     toggleEmojiPanel(true);
     toggleSettingsMenu(true);
     toggleMemoryPanel(true);
-    // 重置标签页状态
-    if (window.switchMemoryTab) {
-        window.switchMemoryTab('table');
-    }
 }
 
-// 【重要】将函数声明为 async
-// 【已重构】支持分页加载和异步渲染
-async function renderMessages(isInitialLoad = false) {
+async function renderMessages(isInitialLoad = false, hasNewMessage = false) {
     if (!currentContact) return;
     const chatMessages = document.getElementById('chatMessages');
+    const allMessages = currentContact.messages;
     
-    // 从消息总数中，根据当前已显示的条数，截取出需要渲染的部分
-    const messagesToRender = (currentContact.messages || []).slice(currentContact.messages.length - currentlyDisplayedMessageCount);
+    // 避免在循环中重复访问localStorage
+    const minimaxGroupId = localStorage.getItem('minimaxGroupId') || '';
+    const minimaxApiKey = localStorage.getItem('minimaxApiKey') || '';
 
-    let messagesHtml = '';
-
-    // 【分页逻辑】如果还有更早的消息未显示，就在最顶部添加一个加载按钮
-    if (currentContact.messages.length > currentlyDisplayedMessageCount) {
-        messagesHtml += `<div class="load-more-messages" onclick="loadMoreMessages()">加载更早的消息...</div>`;
+    if (isInitialLoad) {
+        currentlyDisplayedMessageCount = Math.min(allMessages.length, MESSAGES_PER_PAGE);
     }
+    const messagesToRender = allMessages.slice(allMessages.length - currentlyDisplayedMessageCount);
 
+    const oldScrollHeight = chatMessages.scrollHeight;
+    
+    chatMessages.innerHTML = '';
+
+    if (allMessages.length > currentlyDisplayedMessageCount) {
+        const loadMoreDiv = document.createElement('div');
+        loadMoreDiv.className = 'load-more-messages';
+        loadMoreDiv.textContent = '加载更早的消息...';
+        loadMoreDiv.onclick = loadMoreMessages;
+        chatMessages.appendChild(loadMoreDiv);
+    }
+    
     if (currentContact.type === 'group') {
-        messagesHtml += `<div class="group-info-hint">群聊成员: ${getGroupMembersText()}</div>`;
+        const hint = document.createElement('div');
+        hint.className = 'group-info-hint';
+        hint.textContent = `群聊成员: ${getGroupMembersText()}`;
+        chatMessages.appendChild(hint);
     }
-
-    const buildReasoningHtml = (reasoningText) => {
-        if (!reasoningText || !String(reasoningText).trim()) return '';
-        const safeReasoning = escapeHtml(String(reasoningText)).replace(/\n/g, '<br>');
-        return `
-            <details class="message-reasoning" style="margin-bottom: 6px;">
-                <summary style="font-size: 12px; color: #888; cursor: pointer; user-select: none;">thinking</summary>
-                <div style="margin-top: 6px; font-size: 13px; color: #888; line-height: 1.5;">${safeReasoning}</div>
-            </details>
-        `;
-    };
 
     let lastTimestamp = null;
     for (const [index, msg] of messagesToRender.entries()) {
-        const originalIndex = (currentContact.messages.length - currentlyDisplayedMessageCount) + index;
+        const originalIndex = allMessages.length - currentlyDisplayedMessageCount + index;
         const currentMsgTime = new Date(msg.time);
 
         if (!lastTimestamp || currentMsgTime - lastTimestamp > 5 * 60 * 1000) {
-            messagesHtml += `<div class="message-timestamp">${formatChatTimestamp(msg.time)}</div>`;
+            const timestampDiv = document.createElement('div');
+            timestampDiv.className = 'message-timestamp';
+            timestampDiv.textContent = formatChatTimestamp(msg.time);
+            chatMessages.appendChild(timestampDiv);
             lastTimestamp = currentMsgTime;
         }
 
+        const msgDiv = document.createElement('div');
         if (msg.role === 'system') continue;
+        
+        const isLastMessage = index === messagesToRender.length - 1;
+        const isNewMsg = hasNewMessage && isLastMessage;
+        msgDiv.className = `message ${msg.role === 'user' ? 'sent' : 'received'}${isNewMsg ? ' new-message' : ''}`;
+        msgDiv.dataset.messageIndex = originalIndex;
 
-        // 1. 准备基础变量
-        const isSent = msg.role === 'user';
-        const msgDivClass = `message ${isSent ? 'sent' : 'received'}`;
-        // originalIndex 已在循环开始时声明，这里不需要重复声明
-
-        // 2. 准备消息内容 (contentHtml) - 这部分逻辑您原来是正确的，我们保持不变
         let contentHtml = '';
         if (msg.type === 'emoji') {
-            let emojiSrc = 'placeholder.png';
-            const content = msg.content;
-            if (content.startsWith('http') || content.startsWith('data:')) {
-                emojiSrc = content;
-            } else {
-                const foundEmoji = emojis.find(e => e.meaning === content);
-                if (foundEmoji) {
-                    emojiSrc = await getEmojiSrc(foundEmoji);
-                } else {
-                    contentHtml = `<div class="message-content">[表情: ${content}]</div>`;
-                }
-            }
-            if (!contentHtml) {
-                contentHtml = `<img src="${emojiSrc}" class="message-emoji">`;
-            }
+            contentHtml = await renderEmojiContent(msg.content);
         } else if (msg.type === 'red_packet') {
             const packet = JSON.parse(msg.content);
-            const isSentByUser = msg.role === 'user';
-            const isOpened = msg.opened;
-            let statusText = isSentByUser ? '查看红包' : (isOpened ? '已领取' : '领取红包');
-            const clickHandler = !isSentByUser && !isOpened ? `onclick="openRedPacket(${originalIndex})"` : '';
-            const cursorStyle = !isSentByUser && !isOpened ? 'cursor: pointer;' : 'cursor: default;';
-            const openedClass = isOpened ? 'opened' : '';
-            contentHtml = `
-                <div class="message-content red-packet ${openedClass}" ${clickHandler} style="${cursorStyle}">
-                    <div class="red-packet-body">
-                        <svg class="red-packet-icon" viewBox="0 0 1024 1024"><path d="M840.4 304H183.6c-17.7 0-32 14.3-32 32v552c0 17.7 14.3 32 32 32h656.8c17.7 0 32-14.3 32-32V336c0-17.7-14.3-32-32-32zM731.2 565.2H603.9c-4.4 0-8 3.6-8 8v128.3c0 4.4 3.6 8 8 8h127.3c4.4 0 8-3.6 8-8V573.2c0-4.4-3.6-8-8-8zM419.8 565.2H292.5c-4.4 0-8 3.6-8 8v128.3c0 4.4 3.6 8 8 8h127.3c4.4 0 8-3.6 8-8V573.2c0-4.4-3.6-8-8-8z" fill="#FEFEFE"></path><path d="M872.4 240H151.6c-17.7 0-32 14.3-32 32v64h784v-64c0-17.7-14.3-32-32-32z" fill="#FCD4B3"></path><path d="M512 432c-48.6 0-88 39.4-88 88s39.4 88 88 88 88-39.4 88-88-39.4-88-88-88z m0 152c-35.3 0-64-28.7-64-64s28.7-64 64-64 64 28.7 64 64-28.7 64-64-64z" fill="#FCD4B3"></path><path d="M840.4 304H183.6c-17.7 0-32 14.3-32 32v552c0 17.7 14.3 32 32 32h656.8c17.7 0 32-14.3 32-32V336c0-17.7-14.3-32-32-32z m-32 552H215.6V368h624.8v488z" fill="#F37666"></path><path d="M512 128c-112.5 0-204 91.5-204 204s91.5 204 204 204 204-91.5 204-204-91.5-204-204-204z m0 384c-99.4 0-180-80.6-180-180s80.6-180 180-180 180 80.6 180 180-80.6 180-180 180z" fill="#F37666"></path><path d="M512 456c-35.3 0-64 28.7-64 64s28.7 64 64 64 64 28.7 64 64-28.7-64-64-64z m16.4 76.4c-2.3 2.3-5.4 3.6-8.5 3.6h-15.8c-3.1 0-6.2-1.3-8.5-3.6s-3.6-5.4-3.6-8.5v-27.8c0-6.6 5.4-12 12-12h16c6.6 0 12 5.4 12 12v27.8c0.1 3.1-1.2 6.2-3.5 8.5z" fill="#F37666"></path></svg>
-                        <div class="red-packet-text">
-                            <div>${packet.message || '恭喜发财，大吉大利！'}</div>
-                            <div>${statusText}</div>
-                        </div>
-                    </div>
-                    <div class="red-packet-footer">AI红包</div>
-                </div>
-            `;
+            contentHtml = `<div class="message-content red-packet" onclick="showToast('红包金额: ${packet.amount}')"><div class="red-packet-body"><svg class="red-packet-icon" viewBox="0 0 1024 1024"><path d="M840.4 304H183.6c-17.7 0-32 14.3-32 32v552c0 17.7 14.3 32 32 32h656.8c17.7 0 32-14.3 32-32V336c0-17.7-14.3-32-32-32zM731.2 565.2H603.9c-4.4 0-8 3.6-8 8v128.3c0 4.4 3.6 8 8 8h127.3c4.4 0 8-3.6 8-8V573.2c0-4.4-3.6-8-8-8zM419.8 565.2H292.5c-4.4 0-8 3.6-8 8v128.3c0 4.4 3.6 8 8 8h127.3c4.4 0 8-3.6 8-8V573.2c0-4.4-3.6-8-8-8z" fill="#FEFEFE"></path><path d="M872.4 240H151.6c-17.7 0-32 14.3-32 32v64h784v-64c0-17.7-14.3-32-32-32z" fill="#FCD4B3"></path><path d="M512 432c-48.6 0-88 39.4-88 88s39.4 88 88 88 88-39.4 88-88-39.4-88-88-88z m0 152c-35.3 0-64-28.7-64-64s28.7-64 64-64 64 28.7 64 64-28.7 64-64-64z" fill="#FCD4B3"></path><path d="M840.4 304H183.6c-17.7 0-32 14.3-32 32v552c0 17.7 14.3 32 32 32h656.8c17.7 0 32-14.3 32-32V336c0-17.7-14.3-32-32-32z m-32 552H215.6V368h624.8v488z" fill="#F37666"></path><path d="M512 128c-112.5 0-204 91.5-204 204s91.5 204 204 204 204-91.5 204-204-91.5-204-204-204z m0 384c-99.4 0-180-80.6-180-180s80.6-180 180-180 180 80.6 180 180-80.6 180-180 180z" fill="#F37666"></path><path d="M512 456c-35.3 0-64 28.7-64 64s28.7 64 64 64 64 28.7 64 64-28.7-64-64-64z m16.4 76.4c-2.3 2.3-5.4 3.6-8.5 3.6h-15.8c-3.1 0-6.2-1.3-8.5-3.6s-3.6-5.4-3.6-8.5v-27.8c0-6.6 5.4-12 12-12h16c6.6 0 12 5.4 12 12v27.8c0.1 3.1-1.2 6.2-3.5 8.5z" fill="#F37666"></path></svg><div class="red-packet-text"><div>${packet.message || '恭喜发财，大吉大利！'}</div><div>领取红包</div></div></div><div class="red-packet-footer">AI红包</div></div>`;
         } else {
-            // 处理普通文本消息
-            let processedContent = msg.content;
-            const emojiTagRegex = /\[(?:emoji|发送了表情)[:：]([^\]]+)\]/g;
-            const standaloneEmojiMatch = processedContent.trim().match(/^\[(?:emoji|发送了表情)[:：]([^\]]+)\]$/);
-            if (standaloneEmojiMatch) {
-                 const emojiName = standaloneEmojiMatch[1];
-                 const foundEmoji = emojis.find(e => e.meaning === emojiName);
-                 if(foundEmoji) {
-                    const emojiSrc = await getEmojiSrc(foundEmoji);
-                    contentHtml = `<img src="${emojiSrc}" class="message-emoji">`;
-                 } else {
-                    contentHtml = `<div class="message-content">${processedContent}</div>`;
-                 }
+            contentHtml = await processTextWithInlineEmojis(msg.content);
+        }
+
+
+        let avatarContent = '';
+        if (msg.role === 'user') {
+            avatarContent = await getAvatarHTML(userProfile, 'user') || (userProfile.name[0] || '我');
+        } else {
+            const sender = contacts.find(c => c.id === msg.senderId);
+            if (sender) {
+                avatarContent = await getAvatarHTML(sender, 'contact') || sender.name[0];
             } else {
-                processedContent = processedContent.replace(/\n/g, '<br>');
-                const matches = [...processedContent.matchAll(emojiTagRegex)];
-                if (matches.length > 0) {
-                    for (const match of matches) {
-                        const emojiName = match[1];
-                        const foundEmoji = emojis.find(e => e.meaning === emojiName);
-                        if (foundEmoji) {
-                            const emojiSrc = await getEmojiSrc(foundEmoji);
-                            const imgTag = `<img src="${emojiSrc}" style="max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;">`;
-                            processedContent = processedContent.replace(match[0], imgTag);
-                        }
-                    }
-                }
-                contentHtml = `<div class="message-content">${processedContent}</div>`;
+                avatarContent = '?';
             }
         }
 
-        // "已编辑"标签的代码块已被移除
-
-        // 4. 准备头像 (avatarContent)
-        let avatarContent = '';
-        if (msg.role === 'user') {
-            avatarContent = userProfile.avatar ? `<img src="${userProfile.avatar}">` : (userProfile.name[0] || '我');
+        // 检查是否有自定义气泡样式（根据消息角色选择不同样式）
+        let bubbleHtml = '';
+        const currentBubbleStyle = msg.role === 'user' ? 
+            (window.customBubbleStyleSelf || window.customBubbleStyle) : 
+            (window.customBubbleStyleKare || window.customBubbleStyle);
+            
+        if (currentBubbleStyle && currentBubbleStyle.html && msg.type !== 'emoji' && msg.type !== 'red_packet') {
+            // 使用自定义气泡样式 - 获取原始内容，不包装 message-content
+            console.log(`应用${msg.role === 'user' ? '我的' : '对方的'}自定义气泡样式`);
+            
+            let rawContent = '';
+            if (msg.type === 'emoji') {
+                rawContent = await renderEmojiContent(msg.content);
+            } else if (msg.type === 'red_packet') {
+                // 红包保持原有格式
+                rawContent = contentHtml;
+            } else {
+                // 处理文本，但不包装 message-content
+                rawContent = msg.content.replace(/\n/g, '<br>');
+                
+                // 处理内联表情
+                const emojiTagRegex = /\[emoji:([^\]]+)\]/g;
+                const emojiMatches = [...rawContent.matchAll(emojiTagRegex)];
+                for (const match of emojiMatches) {
+                    const fullMatch = match[0];
+                    const emojiName = match[1];
+                    const foundEmoji = emojis.find(e => e.tag === emojiName || e.meaning === emojiName);
+                    
+                    if (foundEmoji && foundEmoji.tag) {
+                        const emojiHtml = await renderEmojiContent(`[emoji:${foundEmoji.tag}]`, true);
+                        rawContent = rawContent.replace(fullMatch, emojiHtml);
+                    } else if (foundEmoji && foundEmoji.url) {
+                        const replacement = `<img src="${foundEmoji.url}" style="max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;">`;
+                        rawContent = rawContent.replace(fullMatch, replacement);
+                    }
+                }
+            }
+            
+            bubbleHtml = currentBubbleStyle.html.replace('{{BUBBLE_TEXT}}', rawContent);
+            
+            // 处理HTML中的file:格式图片
+            bubbleHtml = await processFileUrlsInHtml(bubbleHtml);
+            
+            // 清理 HTML 中的转义换行符，避免显示 \n
+            bubbleHtml = bubbleHtml.replace(/\\n/g, '');
+            // console.log('生成的自定义气泡 HTML:', bubbleHtml);
         } else {
-            const sender = contacts.find(c => c.id === msg.senderId);
-            avatarContent = sender ? (sender.avatar ? `<img src="${sender.avatar}">` : sender.name[0]) : '?';
+            // 使用默认气泡样式
+            console.log('使用默认气泡样式，自定义样式状态:', {
+                hasCustomStyle: !!window.customBubbleStyle,
+                hasHtml: !!window.customBubbleStyle?.html
+            });
+            bubbleHtml = `<div class="message-bubble">${contentHtml}</div>`;
         }
 
-        const reasoningHtml = buildReasoningHtml(msg.reasoning);
-
-        // 5. 【核心修正】拼接单条消息的完整 HTML
-        let bubbleHtml;
         if (currentContact.type === 'group' && msg.role !== 'user') {
             const sender = contacts.find(c => c.id === msg.senderId);
             const senderName = sender ? sender.name : '未知';
-            // 群聊中他人消息的 HTML 结构
-            bubbleHtml = `<div class="message-bubble"><div class="group-message-header"><div class="group-message-name">${senderName}</div></div>${reasoningHtml}${contentHtml}</div>`;
+            if (currentBubbleStyle && currentBubbleStyle.html && msg.type !== 'emoji' && msg.type !== 'red_packet') {
+                // 对于群聊消息，在自定义气泡前添加发送者信息
+                const groupHeader = `<div class="group-message-header"><div class="group-message-name">${senderName}</div></div>`;
+                
+                // 获取原始内容（与上面相同的逻辑）
+                let rawContent = '';
+                if (msg.type === 'emoji') {
+                    rawContent = await renderEmojiContent(msg.content);
+                } else if (msg.type === 'red_packet') {
+                    rawContent = contentHtml;
+                } else {
+                    rawContent = msg.content.replace(/\n/g, '<br>');
+                    const emojiTagRegex = /\[emoji:([^\]]+)\]/g;
+                    const emojiMatches = [...rawContent.matchAll(emojiTagRegex)];
+                    for (const match of emojiMatches) {
+                        const fullMatch = match[0];
+                        const emojiName = match[1];
+                        const foundEmoji = emojis.find(e => e.tag === emojiName || e.meaning === emojiName);
+                        
+                        if (foundEmoji && foundEmoji.tag) {
+                            const emojiHtml = await renderEmojiContent(`[emoji:${foundEmoji.tag}]`, true);
+                            rawContent = rawContent.replace(fullMatch, emojiHtml);
+                        } else if (foundEmoji && foundEmoji.url) {
+                            const replacement = `<img src="${foundEmoji.url}" style="max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;">`;
+                            rawContent = rawContent.replace(fullMatch, replacement);
+                        }
+                    }
+                }
+                
+                let customBubbleWithHeader = currentBubbleStyle.html.replace('{{BUBBLE_TEXT}}', groupHeader + rawContent);
+                
+                // 处理HTML中的file:格式图片
+                customBubbleWithHeader = await processFileUrlsInHtml(customBubbleWithHeader);
+                
+                // 清理 HTML 中的转义换行符，避免显示 \n
+                customBubbleWithHeader = customBubbleWithHeader.replace(/\\n/g, '');
+                msgDiv.innerHTML = `<div class="message-avatar">${avatarContent}</div>${customBubbleWithHeader}`;
+            } else {
+                msgDiv.innerHTML = `<div class="message-avatar">${avatarContent}</div><div class="message-bubble"><div class="group-message-header"><div class="group-message-name">${senderName}</div></div>${contentHtml}</div>`;
+            }
         } else {
-            // 私聊或群聊中自己消息的 HTML 结构
-            bubbleHtml = `<div class="message-bubble">${reasoningHtml}${contentHtml}</div>`;
-        }
-
-        // 【重构】检查并应用自定义气泡样式（兼容用户和助手）
-        let styleIdToApply = null;
-
-        // 1. 根据消息发送者（用户或助手）确定要使用哪个样式ID
-        if (msg.role === 'user') {
-            styleIdToApply = userProfile.bubbleStyleId;
-        } else if (msg.role === 'assistant') {
-            styleIdToApply = currentContact.bubbleStyleId;
+            msgDiv.innerHTML = `<div class="message-avatar">${avatarContent}</div>${bubbleHtml}`;
         }
         
-        // 2. 检查样式ID是否存在、有效，并且消息类型是普通文本
-        if (styleIdToApply && bubbleStyles[styleIdToApply] && msg.type !== 'emoji' && msg.type !== 'red_packet' && !msg.forceVoice) {
-            try {
-                // 3. 从样式库中获取对应的样式对象
-                const styleToApply = bubbleStyles[styleIdToApply];
+        // 调试：输出最终的 HTML 结构
+        // if (currentBubbleStyle && currentBubbleStyle.html) {
+        //     console.log('最终消息 HTML 结构:', msgDiv.innerHTML);
+        // }
+        
+        // 使用预先读取的值
+        if (msg.isVoice && currentContact.voiceId && minimaxGroupId && minimaxApiKey) {
+            // 兼容自定义气泡和默认气泡
+            const bubble = msgDiv.querySelector('.message-bubble') || 
+                          msgDiv.querySelector('.custom-bubble-container') || 
+                          msgDiv.querySelector('.chat-bubble');
+            if (bubble) {
+                const messageUniqueId = `${currentContact.id}-${msg.time}`; // 使用时间戳保证唯一性
                 
-                // 4. 使用该样式的HTML模板替换默认气泡
-                let finalHtml = styleToApply.html.replace('{{BUBBLE_TEXT}}', msg.content);
-                bubbleHtml = `<div class="message-bubble custom-bubble">${reasoningHtml}${finalHtml}</div>`;
-
-            } catch (error) {
-                console.error("应用自定义气泡模板出错:", error);
-                // 如果出错，会自动使用之前的默认 bubbleHtml，无需额外处理
+                // 给气泡添加语音消息标识
+                bubble.classList.add('voice-message');
+                bubble.dataset.voiceMessageId = `voice-${messageUniqueId}`;
+                
+                // 在消息内容前添加语音符号
+                // 优先查找.message-content，如果没有则直接在气泡内添加
+                const textContentDiv = bubble.querySelector('.message-content') || bubble;
+                if (textContentDiv && !textContentDiv.querySelector('.voice-icon')) {
+                    const voiceIcon = document.createElement('span');
+                    voiceIcon.className = 'voice-icon';
+                    voiceIcon.innerHTML = createVoiceIcon(); // SVG音频波形图标
+                    
+                    // 将语音符号插入到文本内容的最前面
+                    if (textContentDiv === bubble) {
+                        // 如果是直接在气泡内，需要在文本节点前插入
+                        const firstTextNode = Array.from(textContentDiv.childNodes).find(node => 
+                            node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== ''
+                        );
+                        if (firstTextNode) {
+                            textContentDiv.insertBefore(voiceIcon, firstTextNode);
+                        } else {
+                            textContentDiv.insertBefore(voiceIcon, textContentDiv.firstChild);
+                        }
+                    } else {
+                        textContentDiv.insertBefore(voiceIcon, textContentDiv.firstChild);
+                    }
+                }
+                
+                // 给整个气泡添加点击事件来播放语音
+                bubble.style.cursor = 'pointer';
+                
+                // 移除任何已存在的语音播放事件监听器
+                const existingHandler = bubble._voiceClickHandler;
+                if (existingHandler) {
+                    bubble.removeEventListener('click', existingHandler);
+                }
+                
+                // 创建新的事件处理器
+                const voiceClickHandler = (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    console.log('语音气泡被点击，开始播放:', { text: msg.content, voiceId: currentContact.voiceId });
+                    playVoiceMessage(bubble, msg.content, currentContact.voiceId);
+                };
+                
+                // 保存处理器引用并添加事件监听器
+                bubble._voiceClickHandler = voiceClickHandler;
+                bubble.addEventListener('click', voiceClickHandler);
             }
         }
 
-        // 6. 拼接语音播放器
-        let voicePlayerHtml = '';
-        if (msg.forceVoice && currentContact.voiceId && apiSettings.minimaxGroupId && apiSettings.minimaxApiKey) {
-            const messageUniqueId = `${currentContact.id}-${msg.time}`;
-            voicePlayerHtml = `
-                <div class="voice-player" id="voice-player-${messageUniqueId}" onclick="playVoiceMessage(this, '${msg.content.replace(/'/g, "\\'")}', '${currentContact.voiceId}')">
-                    <div class="play-button">▶</div>
-                    <div class="waveform">
-                        <div class="waveform-bar"></div><div class="waveform-bar"></div><div class="waveform-bar"></div>
-                        <div class="waveform-bar"></div><div class="waveform-bar"></div><div class="waveform-bar"></div>
-                        <div class="waveform-bar"></div><div class="waveform-bar"></div><div class="waveform-bar"></div>
-                    </div>
-                    <div class="duration"></div>
-                </div>
-            `;
-            // 将播放器插入到气泡的开头
-            bubbleHtml = bubbleHtml.replace('<div class="message-bubble', '<div class="message-bubble has-voice-player');
-            bubbleHtml = bubbleHtml.replace('>', `>${voicePlayerHtml}`);
-        }
 
-        // 7. 【核心修正】将拼接好的完整消息HTML追加到 messagesHtml
-        messagesHtml += `
-            <div class="${msgDivClass}" data-message-index="${originalIndex}">
-                <div class="message-avatar">${avatarContent}</div>
-                ${bubbleHtml}
-            </div>
-        `;
-    }
-    
-    // 【重要】因为是异步生成，最后再一次性设置 innerHTML
-    chatMessages.innerHTML = messagesHtml;
-    
-    // 重新绑定事件
-    chatMessages.querySelectorAll('.message[data-message-index]').forEach(msgDiv => {
-        const originalIndex = parseInt(msgDiv.dataset.messageIndex, 10);
         if (isMultiSelectMode) {
             msgDiv.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 toggleMessageSelection(originalIndex);
             });
+            if (selectedMessages.has(originalIndex)) {
+                msgDiv.classList.add('message-selected');
+            }
         } else {
-            let msgPressTimer;
-            msgDiv.addEventListener('touchstart', () => { msgPressTimer = setTimeout(() => { showMessageActionMenu(originalIndex, msgDiv); }, 700); });
-            msgDiv.addEventListener('touchend', () => clearTimeout(msgPressTimer));
-            msgDiv.addEventListener('touchmove', () => clearTimeout(msgPressTimer));
-            msgDiv.addEventListener('contextmenu', (e) => { e.preventDefault(); showMessageActionMenu(originalIndex, msgDiv); });
+            addMessageActionListeners(msgDiv, originalIndex);
         }
-    });
+        
+        chatMessages.appendChild(msgDiv);
+    }
 
-
-    // 只有在初次加载时才滚动到底部
     if (isInitialLoad) {
-        chatMessages.scrollTop = chatMessages.scrollHeight;
+        // 只有在初始化加载且没有新消息时才滚动到底部
+        // 这样可以避免每次重新渲染都滚动到顶部的问题
+        if (!hasNewMessage) {
+            setTimeout(() => {
+                chatMessages.scrollTo({
+                    top: chatMessages.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }, 100);
+        }
+    } else {
+        // 非初始化加载时保持当前滚动位置
+        const newScrollHeight = chatMessages.scrollHeight;
+        chatMessages.scrollTop = chatMessages.scrollTop + (newScrollHeight - oldScrollHeight);
     }
 }
 
 
-// 【新增函数】用于分页加载更多消息
 async function loadMoreMessages() {
     if (isLoadingMoreMessages) return;
     isLoadingMoreMessages = true;
@@ -4923,28 +5511,18 @@ async function loadMoreMessages() {
     if (loadMoreButton) {
         loadMoreButton.textContent = '正在加载...';
     }
-    
-    // 记录加载前的高度，用于恢复滚动位置
-    const oldScrollHeight = chatMessages.scrollHeight;
 
-    // 模拟网络延迟，让用户能看到加载状态
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    const newCount = Math.min(currentContact.messages.length, currentlyDisplayedMessageCount + MESSAGES_PER_PAGE);
-    
-    if (newCount > currentlyDisplayedMessageCount) {
-        currentlyDisplayedMessageCount = newCount;
-        await renderMessages(false); // 重新渲染，非初始加载
+    setTimeout(async () => {
+        const allMessages = currentContact.messages;
+        const newCount = Math.min(allMessages.length, currentlyDisplayedMessageCount + MESSAGES_PER_PAGE);
         
-        // 关键：恢复滚动位置，让用户感觉内容是无缝衔接的
-        const newScrollHeight = chatMessages.scrollHeight;
-        chatMessages.scrollTop = newScrollHeight - oldScrollHeight;
-    } else {
-        // 如果没有更多消息了，移除加载按钮
-        if(loadMoreButton) loadMoreButton.remove();
-    }
-    
-    isLoadingMoreMessages = false;
+        if (newCount > currentlyDisplayedMessageCount) {
+            currentlyDisplayedMessageCount = newCount;
+            await renderMessages(false); // 重新渲染，非初始加载
+        }
+        
+        isLoadingMoreMessages = false;
+    }, 500);
 }
 
 function getGroupMembersText() {
@@ -4966,21 +5544,13 @@ async function sendUserMessage() {
     }
 
     currentContact.lastMessage = content;
-    currentContact.lastTime = userMessage.time;
+    currentContact.lastTime = formatContactListTime(new Date().toISOString());
     input.value = '';
     input.style.height = 'auto';
-    renderMessages(true); // 重新渲染并滚动到底部
-    renderContactList();
-    await updateContactInDB(currentContact);
-    
-    // 【新增优化】: 保存数据后，更新内存中联系人列表的摘要信息
-    const contactInList = contacts.find(c => c.id === currentContact.id);
-    if (contactInList) {
-        contactInList.lastMessage = currentContact.lastMessage;
-        contactInList.lastTime = currentContact.lastTime;
-    }
-    
-    input.focus();
+    await addSingleMessage(userMessage, true); // 单独添加用户消息，使用动画
+    await renderContactList();
+    await saveDataToDB(); // 使用IndexedDB保存
+    window.UIManager.safeFocus(input);
 }
 
 async function sendMessage() {
@@ -4997,52 +5567,59 @@ async function sendMessage() {
             await sendGroupMessage();
         } else {
             showTypingIndicator();
-            const { replies, newMemoryTable } = await callAPI(currentContact);
+            const { replies } = await callChatAPIWithPriority(currentContact, [], true);
             hideTypingIndicator();
-            if (newMemoryTable) {
-                currentContact.memoryTableContent = newMemoryTable;
-                await updateContactInDB(currentContact);
+            
+            // 异步更新记忆表格（使用API队列，不阻塞用户操作）
+            if (window.updateMemoryTableWithSecondaryModel) {
+                window.updateMemoryTableWithSecondaryModel(currentContact, true);
             }
             if (!replies || replies.length === 0) { showTopNotification('AI没有返回有效回复'); return; }
-            for (const response of replies) {
+            
+            // 批量处理AI回复，避免每条消息都重新渲染
+            for (let i = 0; i < replies.length; i++) {
+                const response = replies[i];
+                const isLastReply = i === replies.length - 1;
+                
                 await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 800));
                 
-                let messageContent = response.content;
-                let forceVoice = false;
-
-                // 检查并处理AI的语音指令
-                if (messageContent.startsWith('[语音]:')) {
-                    forceVoice = true;
-                    // 从消息内容中移除 [语音]: 标签
-                    messageContent = messageContent.substring(4).trim();
-                }
+                let rawMessageContent = removeThinkingChain(response.content);
+                const voiceParsed = parseVoiceMessage(rawMessageContent);
 
                 const aiMessage = { 
                     role: 'assistant', 
-                    content: messageContent, // 使用处理过的内容
+                    content: voiceParsed.content,
                     type: response.type, 
-                    reasoning: response.reasoning || '',
                     time: new Date().toISOString(), 
                     senderId: currentContact.id,
-                    forceVoice: forceVoice // 添加新标志
+                    isVoice: voiceParsed.isVoice
                 };
 
                 currentContact.messages.push(aiMessage);
                 if (currentContact.messages.length > currentlyDisplayedMessageCount) {
                     currentlyDisplayedMessageCount++;
                 }
-                currentContact.lastMessage = response.type === 'text' ? response.content.substring(0, 20) + '...' : (response.type === 'emoji' ? '[表情]' : '[红包]');
-                currentContact.lastTime = aiMessage.time;
-                renderMessages(true); // 重新渲染并滚动到底部
-                renderContactList();
-                await updateContactInDB(currentContact);
                 
-                // 【新增优化】: 保存数据后，更新内存中联系人列表的摘要信息
-                const contactInList = contacts.find(c => c.id === currentContact.id);
-                if (contactInList) {
-                    contactInList.lastMessage = currentContact.lastMessage;
-                    contactInList.lastTime = currentContact.lastTime;
+                // 单独添加这条新消息，而不是重新渲染整个界面
+                await addSingleMessage(aiMessage, true); // true表示这是AI回复的新消息
+                
+                // 只在最后一条消息时更新联系人列表和保存数据
+                if (isLastReply) {
+                    currentContact.lastMessage = response.type === 'text' ? response.content.substring(0, 20) + '...' : (response.type === 'emoji' ? '[表情]' : '[红包]');
+                    currentContact.lastTime = formatContactListTime(new Date().toISOString());
+                    await renderContactList();
+                    await saveDataToDB();
                 }
+            }
+            // 检查是否需要更新记忆（新逻辑：用户发送2条消息就触发）
+            
+            if (window.characterMemoryManager && window.contacts && Array.isArray(window.contacts)) {
+                try {
+                    await window.characterMemoryManager.checkAndUpdateMemory(currentContact.id, currentContact);
+                } catch (error) {
+                    console.error('检查更新记忆失败:', error);
+                }
+            } else {
             }
         }
     } catch (error) {
@@ -5050,23 +5627,10 @@ async function sendMessage() {
         console.error('错误详情:', {
             name: error.name,
             message: error.message,
-            stack: error.stack,
-            currentContact: currentContact ? {
-                id: currentContact.id,
-                name: currentContact.name,
-                type: currentContact.type,
-                messagesCount: currentContact.messages ? currentContact.messages.length : 0
-            } : null,
-            apiSettings: {
-                url: apiSettings.url ? 'configured' : 'not configured',
-                key: apiSettings.key ? 'configured' : 'not configured',
-                model: apiSettings.model ? 'configured' : 'not configured'
-            },
             timestamp: new Date().toISOString(),
-            userAgent: navigator.userAgent,
             url: window.location.href
         });
-        showToast('发送失败：' + error.message);
+        // API错误已在callAPI内部处理，这里只需要清理UI状态
         hideTypingIndicator();
     } finally {
         sendBtn.disabled = false;
@@ -5075,83 +5639,137 @@ async function sendMessage() {
 
 async function sendGroupMessage() {
     if (!currentContact || currentContact.type !== 'group') return;
-    let turnContext = []; 
-    for (const memberId of currentContact.members) {
-        const member = contacts.find(c => c.id === memberId);
-        if (!member || member.type === 'group') continue;
-        showTypingIndicator(member);
+    
+    showTypingIndicator();
+    try {
+        // 一次性调用API获取所有群成员的回复
+        const { replies } = await callChatAPIWithPriority(currentContact, [], true);
+        hideTypingIndicator();
+        
+        if (!replies || replies.length === 0) {
+            showTopNotification('群聊AI没有返回有效回复');
+            return;
+        }
+        
+        // 解析JSON格式的群聊回复
+        let groupMessages = [];
         try {
-            const { replies, newMemoryTable } = await callAPI(member, turnContext);
-            hideTypingIndicator();
-            if (newMemoryTable) {
-                window.memoryTableManager.updateContactMemoryTable(currentContact, newMemoryTable);
-                await updateContactInDB(currentContact);
-            }
-            if (!replies || replies.length === 0) continue;
-            for (const response of replies) {
-                await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 800));
-
-                let messageContent = response.content;
-                let forceVoice = false;
-
-                if (messageContent.startsWith('[语音]:')) {
-                    forceVoice = true;
-                    messageContent = messageContent.substring(4).trim();
-                }
-
-                const aiMessage = { 
-                    role: 'assistant', 
-                    content: messageContent,
-                    type: response.type, 
-                    reasoning: response.reasoning || '',
-                    time: new Date().toISOString(), 
-                    senderId: member.id,
-                    forceVoice: forceVoice 
-                };
-
-                currentContact.messages.push(aiMessage);
-                if (currentContact.messages.length > currentlyDisplayedMessageCount) {
-                    currentlyDisplayedMessageCount++;
-                }
-                turnContext.push(aiMessage);
-                currentContact.lastMessage = `${member.name}: ${response.type === 'text' ? response.content.substring(0, 15) + '...' : '[表情]'}`;
-                currentContact.lastTime = aiMessage.time;
-                renderMessages(true); // 重新渲染并滚动到底部
-                renderContactList();
-                await updateContactInDB(currentContact);
-                
-                // 【新增优化】: 保存数据后，更新内存中联系人列表的摘要信息
-                const contactInList = contacts.find(c => c.id === currentContact.id);
-                if (contactInList) {
-                    contactInList.lastMessage = currentContact.lastMessage;
-                    contactInList.lastTime = currentContact.lastTime;
+            // 假设第一个reply包含所有群成员的回复
+            const firstReply = replies[0];
+            let responseText = removeThinkingChain(firstReply.content);
+            
+            // 尝试解析JSON格式的回复（支持纯JSON、Markdown代码块等格式）
+            if (responseText.includes('{') && responseText.includes('}')) {
+                try {
+                    // 使用统一的JSON提取函数清理markdown语法
+                    const cleanedJson = window.apiService.extractJSON(responseText);
+                    const parsedResponse = JSON.parse(cleanedJson);
+                    
+                    if (parsedResponse.messages && Array.isArray(parsedResponse.messages)) {
+                        groupMessages = parsedResponse.messages;
+                    }
+                } catch (jsonError) {
+                    console.error('群聊JSON提取失败:', jsonError);
+                    
+                    // 继续使用原有逻辑作为备用
+                    const jsonStart = responseText.indexOf('{');
+                    const jsonEnd = responseText.lastIndexOf('}') + 1;
+                    const jsonText = responseText.substring(jsonStart, jsonEnd);
+                    
+                    const parsedResponse = JSON.parse(jsonText);
+                    if (parsedResponse.messages && Array.isArray(parsedResponse.messages)) {
+                        groupMessages = parsedResponse.messages;
+                    }
                 }
             }
         } catch (error) {
-            console.error(`群聊消息发送错误 - ${member.name}:`, error);
-            console.error('群聊错误详情:', {
-                memberInfo: {
-                    id: member.id,
-                    name: member.name,
-                    type: member.type
-                },
-                groupInfo: {
-                    id: currentContact.id,
-                    name: currentContact.name,
-                    membersCount: currentContact.members ? currentContact.members.length : 0
-                },
-                turnContextLength: turnContext.length,
-                errorName: error.name,
-                errorMessage: error.message,
-                errorStack: error.stack,
-                timestamp: new Date().toISOString()
+            console.error('解析群聊JSON回复失败:', error);
+            console.error('错误详情:', {
+                error: error.message,
+                firstReply: replies[0],
+                repliesLength: replies.length
             });
-            hideTypingIndicator();
+            // 显示具体的错误信息而不是泛泛的"无法解析API回复"
+            showTopNotification(`无法解析API回复: ${error.message}`);
+            return;
         }
+        
+        if (groupMessages.length === 0) {
+            showTopNotification('未能解析出有效的群聊回复');
+            return;
+        }
+        
+        // 逐个显示群成员的发言
+        for (let i = 0; i < groupMessages.length; i++) {
+            const message = groupMessages[i];
+            
+            // 查找对应的群成员
+            const member = contacts.find(c => c.name === message.speaker && currentContact.members.includes(c.id));
+            if (!member) {
+                console.warn(`未找到群成员: ${message.speaker}`);
+                continue;
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 800));
+            
+            const voiceParsed = parseVoiceMessage(message.content);
+            
+            const aiMessage = {
+                role: 'assistant',
+                content: voiceParsed.content,
+                type: 'text',
+                time: new Date().toISOString(),
+                senderId: member.id,
+                isVoice: voiceParsed.isVoice
+            };
+            
+            currentContact.messages.push(aiMessage);
+            if (currentContact.messages.length > currentlyDisplayedMessageCount) {
+                currentlyDisplayedMessageCount++;
+            }
+            
+            // 单独添加群成员消息
+            await addSingleMessage(aiMessage, true);
+            
+            // 异步更新该成员的记忆
+            if (window.characterMemoryManager) {
+                setTimeout(async () => {
+                    try {
+                        await window.characterMemoryManager.checkAndUpdateMemory(member.id, currentContact);
+                    } catch (error) {
+                        console.error(`群聊成员记忆更新失败 - ${member.name}:`, error);
+                    }
+                }, 1000);
+            }
+        }
+        
+        // 更新群聊最后消息和时间
+        if (groupMessages.length > 0) {
+            const lastMessage = groupMessages[groupMessages.length - 1];
+            currentContact.lastMessage = `${lastMessage.speaker}: ${lastMessage.content.substring(0, 15)}...`;
+            currentContact.lastTime = formatContactListTime(new Date().toISOString());
+            await renderContactList();
+            await saveDataToDB();
+        }
+        
+    } catch (error) {
+        console.error('群聊消息发送错误:', error);
+        console.error('群聊错误详情:', {
+            groupInfo: {
+                id: currentContact.id,
+                name: currentContact.name,
+                membersCount: currentContact.members ? currentContact.members.length : 0
+            },
+            errorName: error.name,
+            errorMessage: error.message,
+            timestamp: new Date().toISOString()
+        });
+        hideTypingIndicator();
+        showTopNotification(`群聊回复失败: ${error.message}`);
     }
 }
 
-function showTypingIndicator(contact = null) {
+async function showTypingIndicator(contact = null) {
     const chatMessages = document.getElementById('chatMessages');
     let indicator = document.getElementById('typingIndicator');
     if (indicator) indicator.remove();
@@ -5160,9 +5778,20 @@ function showTypingIndicator(contact = null) {
     indicator.id = 'typingIndicator';
     chatMessages.appendChild(indicator);
     const displayContact = contact || currentContact;
-    let avatarContent = displayContact ? (displayContact.avatar ? `<img src="${displayContact.avatar}">` : displayContact.name[0]) : '';
+    
+    let avatarContent = '';
+    if (displayContact) {
+        avatarContent = await getAvatarHTML(displayContact, 'contact') || displayContact.name[0];
+    }
+    
     indicator.innerHTML = `<div class="message-avatar">${avatarContent}</div><div class="message-bubble"><div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div>`;
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    // 延时滚动，让打字指示器的动画先开始
+    setTimeout(() => {
+        chatMessages.scrollTo({
+            top: chatMessages.scrollHeight,
+            behavior: 'smooth'
+        });
+    }, 100); // 稍微延长延时，让动画更明显
 }
 
 function hideTypingIndicator() {
@@ -5170,573 +5799,424 @@ function hideTypingIndicator() {
     if (indicator) indicator.remove();
 }
 
-// =================================================================
-// 新增：记忆表格增量更新工具
-// =================================================================
-const MemoryPatcher = {
-    applyDiff: function(oldMarkdown, diffJson) {
-        if (!oldMarkdown) return ""; 
+/**
+ * 单独添加一条新消息，而不是重新渲染整个聊天界面
+ */
+async function addSingleMessage(message, isNewMessage = false) {
+    const chatMessages = document.getElementById('chatMessages');
+    
+    // 创建消息元素
+    const msgDiv = document.createElement('div');
+    if (message.role === 'system') return;
+    
+    msgDiv.className = `message ${message.role === 'user' ? 'sent' : 'received'}${isNewMessage ? ' new-message' : ''}`;
+    // 设置正确的消息索引
+    const messageIndex = currentContact.messages.findIndex(m => m === message);
+    msgDiv.dataset.messageIndex = messageIndex >= 0 ? messageIndex : currentContact.messages.length - 1;
 
-        let lines = oldMarkdown.split(/\r?\n/);
-        const escapeRegExp = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const isMarkdownHeadingLine = line => /^#{1,6}\s+\S/.test(String(line).trim());
-        
-        try {
-            const operations = JSON.parse(diffJson);
-            
-            operations.forEach(op => {
-                // 1. 找到对应板块：优先 ### 【section】，否则 # section（兼容默认模板里的一级标题）
-                const sectionName = op.section != null ? String(op.section) : '';
-                if (!sectionName) return;
-
-                const primaryHeader = `### 【${sectionName}】`;
-                let startIndex = -1;
-                let headerHit = null;
-
-                for (let i = 0; i < lines.length; i++) {
-                    if (lines[i].includes(primaryHeader)) {
-                        startIndex = i;
-                        headerHit = primaryHeader;
-                        break;
-                    }
-                }
-                if (startIndex === -1) {
-                    const fallbackRe = new RegExp(`^#\\s+${escapeRegExp(sectionName)}\\s*$`);
-                    for (let i = 0; i < lines.length; i++) {
-                        if (fallbackRe.test(lines[i].trim())) {
-                            startIndex = i;
-                            headerHit = lines[i].trim();
-                            break;
-                        }
-                    }
-                }
-
-                if (startIndex === -1) return; // 没找到板块，跳过（不报错）
-
-                let endIndex = lines.length;
-                for (let j = startIndex + 1; j < lines.length; j++) {
-                    if (isMarkdownHeadingLine(lines[j])) {
-                        endIndex = j;
-                        break;
-                    }
-                }
-
-                console.log(`[记忆补丁] 命中 section: ${sectionName}, header: ${headerHit}`);
-
-                // 2. 执行操作
-                if (op.op === 'update') {
-                    // 更新逻辑保持不变
-                    for (let i = startIndex; i < endIndex; i++) {
-                        if (lines[i].includes(`| ${op.key} |`)) {
-                            lines[i] = `| ${op.key} | ${op.value} |`;
-                            break;
-                        }
-                    }
-                } 
-                else if (op.op === 'append') {
-                    // 【核心修复】：追加逻辑优化
-                    // 不要直接在 endIndex 插入，而是从 endIndex 往回找，找到最后一个非空行
-                    // 这样可以确保新行紧贴着表格底部，消除空行导致的断层
-                    let insertIndex = endIndex;
-                    while (insertIndex > startIndex && lines[insertIndex - 1].trim() === '') {
-                        insertIndex--;
-                    }
-                    
-                    // 确保 op.line 前后没有多余的换行符干扰
-                    lines.splice(insertIndex, 0, op.line.trim());
-                    
-                    // 因为插入了新行，原来的 endIndex 位置也后移了，虽然循环会重新计算，但逻辑上要注意
-                } 
-                else if (op.op === 'delete') {
-                    // 删除逻辑保持不变
-                    for (let i = startIndex; i < endIndex; i++) {
-                        if (lines[i].includes(op.keyword)) {
-                            lines.splice(i, 1);
-                            i--; 
-                            endIndex--; 
-                        }
-                    }
-                }
-            });
-            
-            return lines.join('\n');
-        } catch (e) {
-            console.error("记忆表格Patch失败:", e);
-            return oldMarkdown; 
-        }
+    let contentHtml = '';
+    if (message.type === 'emoji') {
+        contentHtml = await renderEmojiContent(message.content);
+    } else if (message.type === 'red_packet') {
+        const packet = JSON.parse(message.content);
+        contentHtml = `<div class="message-content red-packet" onclick="showToast('红包金额: ${packet.amount}')"><div class="red-packet-body"><svg class="red-packet-icon" viewBox="0 0 1024 1024"><path d="M840.4 304H183.6c-17.7 0-32 14.3-32 32v552c0 17.7 14.3 32 32 32h656.8c17.7 0 32-14.3 32-32V336c0-17.7-14.3-32-32-32zM731.2 565.2H603.9c-4.4 0-8 3.6-8 8v128.3c0 4.4 3.6 8 8 8h127.3c4.4 0 8-3.6 8-8V573.2c0-4.4-3.6-8-8-8zM419.8 565.2H292.5c-4.4 0-8 3.6-8 8v128.3c0 4.4 3.6 8 8 8h127.3c4.4 0 8-3.6 8-8V573.2c0-4.4-3.6-8-8-8z" fill="#FEFEFE"></path><path d="M872.4 240H151.6c-17.7 0-32 14.3-32 32v64h784v-64c0-17.7-14.3-32-32-32z" fill="#FCD4B3"></path><path d="M512 432c-48.6 0-88 39.4-88 88s39.4 88 88 88 88-39.4 88-88-39.4-88-88-88z m0 152c-35.3 0-64-28.7-64-64s28.7-64 64-64 64 28.7 64 64-28.7 64-64-64z" fill="#FCD4B3"></path><path d="M840.4 304H183.6c-17.7 0-32 14.3-32 32v552c0 17.7 14.3 32 32 32h656.8c17.7 0 32-14.3 32-32V336c0-17.7-14.3-32-32-32z m-32 552H215.6V368h624.8v488z" fill="#F37666"></path><path d="M512 128c-112.5 0-204 91.5-204 204s91.5 204 204 204 204-91.5 204-204-91.5-204-204-204z m0 384c-99.4 0-180-80.6-180-180s80.6-180 180-180 180 80.6 180 180-80.6 180-180 180z" fill="#F37666"></path><path d="M512 456c-35.3 0-64 28.7-64 64s28.7 64 64 64 64 28.7 64 64-28.7-64-64-64z m16.4 76.4c-2.3 2.3-5.4 3.6-8.5 3.6h-15.8c-3.1 0-6.2-1.3-8.5-3.6s-3.6-5.4-3.6-8.5v-27.8c0-6.6 5.4-12 12-12h16c6.6 0 12 5.4 12 12v27.8c0.1 3.1-1.2 6.2-3.5 8.5z" fill="#F37666"></path></svg><div class="red-packet-text"><div>${packet.message || '恭喜发财，大吉大利！'}</div><div>领取红包</div></div></div><div class="red-packet-footer">AI红包</div></div>`;
+    } else {
+        contentHtml = await processTextWithInlineEmojis(message.content);
     }
-};
+
+    let avatarContent = '';
+    if (message.role === 'assistant') {
+        if (currentContact.type === 'group') {
+            // 修复：从contacts数组中查找成员，而不是从members数组（members只存储ID）
+            const member = contacts.find(c => c.id === message.senderId);
+            avatarContent = member ? (await getAvatarHTML(member, 'contact') || member.name[0]) : '🤖';
+        } else {
+            avatarContent = await getAvatarHTML(currentContact, 'contact') || currentContact.name[0];
+        }
+    } else {
+        avatarContent = await getAvatarHTML(userProfile, 'user') || userProfile?.name?.[0] || '我';
+    }
+
+    // 应用自定义气泡样式（与renderMessages中的逻辑保持一致）
+    const currentBubbleStyle = message.role === 'user' ? 
+        (window.customBubbleStyleSelf || window.customBubbleStyle) : 
+        (window.customBubbleStyleKare || window.customBubbleStyle);
+        
+    let bubbleHtml = '';
+    if (currentBubbleStyle && currentBubbleStyle.html && message.type !== 'emoji' && message.type !== 'red_packet') {
+        // 使用自定义气泡样式 - 获取原始内容，不包装 message-content
+        console.log(`应用${message.role === 'user' ? '我的' : '对方的'}自定义气泡样式`);
+        
+        let rawContent = '';
+        if (message.type === 'emoji') {
+            rawContent = await renderEmojiContent(message.content);
+        } else if (message.type === 'red_packet') {
+            // 红包保持原有格式
+            rawContent = contentHtml;
+        } else {
+            // 处理文本，但不包装 message-content
+            rawContent = message.content.replace(/\n/g, '<br>');
+            
+            // 处理内联表情
+            const emojiTagRegex = /\[emoji:([^\]]+)\]/g;
+            const emojiMatches = [...rawContent.matchAll(emojiTagRegex)];
+            for (const match of emojiMatches) {
+                const fullMatch = match[0];
+                const emojiName = match[1];
+                const foundEmoji = emojis.find(e => e.tag === emojiName || e.meaning === emojiName);
+                
+                if (foundEmoji && foundEmoji.tag) {
+                    const emojiHtml = await renderEmojiContent(`[emoji:${foundEmoji.tag}]`, true);
+                    rawContent = rawContent.replace(fullMatch, emojiHtml);
+                } else if (foundEmoji && foundEmoji.url) {
+                    const replacement = `<img src="${foundEmoji.url}" style="max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;">`;
+                    rawContent = rawContent.replace(fullMatch, replacement);
+                }
+            }
+        }
+        
+        bubbleHtml = currentBubbleStyle.html.replace('{{BUBBLE_TEXT}}', rawContent);
+        
+        // 处理HTML中的file:格式图片
+        bubbleHtml = await processFileUrlsInHtml(bubbleHtml);
+        
+        // 清理 HTML 中的转义换行符，避免显示 \n
+        bubbleHtml = bubbleHtml.replace(/\\n/g, '');
+        // console.log('生成的自定义气泡 HTML:', bubbleHtml);
+    } else {
+        // 使用默认气泡样式
+        console.log('使用默认气泡样式，自定义样式状态:', {
+            hasCustomStyle: !!window.customBubbleStyle,
+            hasHtml: !!window.customBubbleStyle?.html
+        });
+        bubbleHtml = `<div class="message-bubble">${contentHtml}</div>`;
+    }
+
+    if (currentContact.type === 'group' && message.role === 'assistant') {
+        // 修复：从contacts数组中查找成员
+        const member = contacts.find(c => c.id === message.senderId);
+        const memberName = member ? member.name : '未知成员';
+        
+        if (currentBubbleStyle && currentBubbleStyle.html && message.type !== 'emoji' && message.type !== 'red_packet') {
+            // 对于群聊消息，在自定义气泡前添加发送者信息
+            const groupHeader = `<div class="group-message-header"><div class="group-message-name">${memberName}</div></div>`;
+            
+            // 获取原始内容（与上面相同的逻辑）
+            let rawContent = '';
+            if (message.type === 'emoji') {
+                rawContent = await renderEmojiContent(message.content);
+            } else if (message.type === 'red_packet') {
+                rawContent = contentHtml;
+            } else {
+                rawContent = message.content.replace(/\n/g, '<br>');
+                const emojiTagRegex = /\[emoji:([^\]]+)\]/g;
+                const emojiMatches = [...rawContent.matchAll(emojiTagRegex)];
+                for (const match of emojiMatches) {
+                    const fullMatch = match[0];
+                    const emojiName = match[1];
+                    const foundEmoji = emojis.find(e => e.tag === emojiName || e.meaning === emojiName);
+                    
+                    if (foundEmoji && foundEmoji.tag) {
+                        const emojiHtml = await renderEmojiContent(`[emoji:${foundEmoji.tag}]`, true);
+                        rawContent = rawContent.replace(fullMatch, emojiHtml);
+                    } else if (foundEmoji && foundEmoji.url) {
+                        const replacement = `<img src="${foundEmoji.url}" style="max-width: 100px; max-height: 100px; border-radius: 8px; vertical-align: middle; margin: 2px;">`;
+                        rawContent = rawContent.replace(fullMatch, replacement);
+                    }
+                }
+            }
+            
+            let customBubbleWithHeader = currentBubbleStyle.html.replace('{{BUBBLE_TEXT}}', groupHeader + rawContent);
+            
+            // 处理HTML中的file:格式图片
+            customBubbleWithHeader = await processFileUrlsInHtml(customBubbleWithHeader);
+            
+            // 清理 HTML 中的转义换行符，避免显示 \n
+            customBubbleWithHeader = customBubbleWithHeader.replace(/\\n/g, '');
+            msgDiv.innerHTML = `<div class="message-avatar">${avatarContent}</div>${customBubbleWithHeader}`;
+        } else {
+            msgDiv.innerHTML = `<div class="message-avatar">${avatarContent}</div><div class="message-bubble"><div class="group-message-header"><div class="group-message-name">${memberName}</div></div>${contentHtml}</div>`;
+        }
+    } else {
+        msgDiv.innerHTML = `<div class="message-avatar">${avatarContent}</div>${bubbleHtml}`;
+    }
+
+    // 添加长按事件监听器 - 修复新消息无法长按弹出菜单的问题
+    if (!isMultiSelectMode) {
+        const originalIndex = parseInt(msgDiv.dataset.messageIndex);
+        addMessageActionListeners(msgDiv, originalIndex);
+    }
+
+    // 添加到聊天界面
+    chatMessages.appendChild(msgDiv);
+
+    // 处理语音消息UI
+    setupVoiceMessageUI(msgDiv, message, currentContact);
+
+    // 只有新消息才滚动到底部，避免每次添加消息都重新滚动
+    if (isNewMessage) {
+        setTimeout(() => {
+            chatMessages.scrollTo({
+                top: chatMessages.scrollHeight,
+                behavior: 'smooth'
+            });
+        }, 150); // 新消息延时150ms，让滑入动画更明显
+    }
+}
 
 /**
- * [MODIFIED] 主副模型分离版本：主模型只管聊天，副模型后台更新记忆
+ * 通过我们的 Netlify Function 代理来调用 API。
  * @param {object} contact The contact object.
  * @param {array} turnContext Additional messages for group chat context.
  * @returns {object} The API response containing replies and the new memory table.
  */
-function estimatePromptChars(text) {
-    return String(text || '').length;
-}
-
-const MIN_AI_BUBBLE_COUNT = 5;
-
-function splitAIReplyIntoBubbleLines(text, minCount = MIN_AI_BUBBLE_COUNT) {
-    const rawText = String(text || '').trim();
-    if (!rawText) return [];
-
-    const rawLines = rawText
-        .split(/\n+/)
-        .map(line => line.trim())
-        .filter(Boolean);
-
-    if (rawLines.length >= minCount) {
-        return rawLines;
-    }
-
-    // 表情和红包这类特殊格式不能乱按标点切，否则会破坏格式
-    const specialLineRegex = /^(<emoji>.*?<\/emoji>|\[red_packet:{.*}\])$/;
-    if (rawLines.some(line => specialLineRegex.test(line))) {
-        return rawLines;
-    }
-
-    // 第一轮：按句末标点拆
-    let sentenceParts = rawText
-        .replace(/([。！？!?；;…]+)\s*/g, '$1\n')
-        .split(/\n+/)
-        .map(line => line.trim())
-        .filter(Boolean);
-
-    if (sentenceParts.length >= minCount) {
-        return sentenceParts;
-    }
-
-    // 第二轮：如果仍然太少，再允许按逗号拆，让一整段也能变成聊天节奏
-    sentenceParts = rawText
-        .replace(/([。！？!?；;…]+|，|,)\s*/g, '$1\n')
-        .split(/\n+/)
-        .map(line => line.trim())
-        .filter(Boolean);
-
-    if (sentenceParts.length > rawLines.length) {
-        return sentenceParts;
-    }
-
-    return rawLines;
-}
-
 async function callAPI(contact, turnContext = []) {
     try {
-        let retrievedMemoryFacts = [];
-        try {
-            const msgs = contact.messages || [];
-            const lastMsg = msgs[msgs.length - 1];
-            const userInput = lastMsg && lastMsg.role === 'user' ? String(lastMsg.content || '') : '';
-            const queryText = buildMemoryRetrievalQuery(contact, userInput);
-            retrievedMemoryFacts = await retrieveRelevantMemoryFacts(contact.id, queryText, {
-                limit: 10,
-                minScore: 7,
-                lastUserMessage: userInput
-            });
-            setLastTriggeredMemoryFactsDebug(contact, queryText, retrievedMemoryFacts);
-            if (retrievedMemoryFacts.length > 0) {
-                console.log('[记忆检索] 注入主模型 facts 数量:', retrievedMemoryFacts.length);
-            } else {
-                console.log('[记忆检索] 没有相关结构化记忆，本轮只使用旧记忆表');
-            }
-        } catch (retrievalErr) {
-            console.warn('[记忆检索] 检索失败，继续使用旧记忆表:', retrievalErr);
-            setLastTriggeredMemoryFactsDebug(contact, '', []);
-        }
-
-        // ==========================================
-        // 阶段一：主模型生成对话
-        // ==========================================
-        const systemPrompt = window.promptBuilder.buildChatPrompt(
-            contact, userProfile, currentContact, apiSettings, emojis, window, turnContext
-        );
-        const cleanHistoryForWorldBook = window.promptBuilder.buildMessageHistory(
-            currentContact, apiSettings, userProfile, contacts, contact, emojis, turnContext, false, []
+        // 1. 构建系统提示词
+        const systemPrompt = await window.promptBuilder.buildChatPrompt(
+            contact, 
+            userProfile, 
+            currentContact, 
+            apiSettings, 
+            emojis, 
+            window, 
+            turnContext
         );
 
-        const triggeredEntriesText = getTriggeredWorldBookEntries(contact, cleanHistoryForWorldBook);
-
+        // 2. 构建消息数组
+        const messages = [{ role: 'system', content: systemPrompt }];
         const messageHistory = window.promptBuilder.buildMessageHistory(
-            currentContact, apiSettings, userProfile, contacts, contact, emojis, turnContext, true, retrievedMemoryFacts,
-            {
-                includeFullMemoryTableInMainPrompt: false,
-                memoryPreviewMaxChars: 0,
-                keepLatestUserMessageLast: true
-            }
+            currentContact, 
+            apiSettings, 
+            userProfile, 
+            contacts, 
+            contact, 
+            emojis, 
+            turnContext
         );
 
-        // 【核心修改】：首条 System 消息永远保持纯静态，只放固定的人设和规则
-        const messages = [{ role: 'system', content: systemPrompt }, ...messageHistory];
+        messages.push(...messageHistory);
 
-        if (triggeredEntriesText) {
-            const systemContextIndex = messages.findIndex(m =>
-                m.role === 'user' &&
-                typeof m.content === 'string' &&
-                m.content.startsWith('[System Context / 系统实时状态]')
-            );
-
-            if (systemContextIndex >= 0) {
-                messages[systemContextIndex].content += `\n\n${triggeredEntriesText}`;
-            } else {
-                let insertIndex = messages.length;
-                for (let i = messages.length - 1; i >= 0; i--) {
-                    if (messages[i].role === 'user') {
-                        insertIndex = i;
-                        break;
-                    }
-                }
-                messages.splice(insertIndex, 0, {
-                    role: 'user',
-                    content: `[WorldBook / 世界书触发设定]\n${triggeredEntriesText}`
-                });
-            }
-        }
-
-        console.table(messages.map((m, i) => ({
-            index: i,
-            role: m.role,
-            chars: estimatePromptChars(m.content),
-            preview: String(m.content || '').slice(0, 80).replace(/\n/g, ' ')
-        })));
-
-        // 1. 调用主模型
-        const chatData = await window.apiService.callOpenAIAPI(
-            apiSettings.url, apiSettings.key, apiSettings.model, messages, {}, (apiSettings.timeout || 60) * 1000
-        );
-
-        if (chatData.usage) {
-            const usage = chatData.usage;
-            const totalPrompt = usage.prompt_tokens;
-            const cachedTokens = usage.prompt_cache_hit_tokens ||
-                                (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) || 0;
-            const outputTokens = usage.completion_tokens || 0;
-            const missTokens = totalPrompt - cachedTokens;
-            
-            const hitRate = ((cachedTokens / totalPrompt) * 100).toFixed(1);
-            
-            // 计算成本（元/百万Token，可由用户在 API 设置中自定义）
-            const cost = (
-                (cachedTokens / 1000000 * (apiSettings.priceHit ?? 0)) +
-                (missTokens / 1000000 * (apiSettings.priceMiss ?? 0)) +
-                (outputTokens / 1000000 * (apiSettings.priceOut ?? 0))
-            ).toFixed(5);
-
-            // 保存到全局以便切换显示
-            window.lastStats = { hitRate, totalPrompt, cachedTokens, outputTokens, cost };
-            
-            // 实时更新 UI
-            updateStatsUI();
-            
-            console.log(`📊 [API 消耗统计] 命中率: ${hitRate}% | 预估成本: ￥${cost}`);
-        }
-
-        if (!chatData) throw new Error('主模型返回数据为空');
-
-        let fullResponseText = chatData.choices?.[0]?.message?.content || chatData.candidates?.[0]?.content?.parts?.[0]?.text;
-        let reasoningContent = chatData.choices?.[0]?.message?.reasoning_content || '';
+        // 3. 调用API
+        console.log(`[多key调试] callAPI被调用，当前使用的API Key: ${apiSettings.key ? apiSettings.key.substring(0, 10) + '...' : 'null'}`);
         
+        const data = await window.apiService.callOpenAIAPI(
+            apiSettings.url,
+            apiSettings.key,
+            apiSettings.model,
+            messages,
+            {},
+            (apiSettings.timeout || 60) * 1000
+        );
+        
+
+        // 4. 处理响应
+        if (!data) {
+            throw new Error('API返回数据为空');
+        }
+
+        let fullResponseText;
+        if (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) {
+            // 标准OpenAI格式
+            fullResponseText = data.choices[0].message.content;
+        } else if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0]) {
+            // Gemini API 格式
+            fullResponseText = data.candidates[0].content.parts[0].text;
+        } else if (data.content) {
+            // 可能的替代格式
+            fullResponseText = data.content;
+        } else if (data.message) {
+            // 另一种可能的格式
+            fullResponseText = data.message;
+        } else {
+            // 检查是否是因为没有生成内容
+            if (data.choices && data.choices[0] && data.choices[0].finish_reason === 'content_filter') {
+                throw new Error('AI模型没有生成回复，可能是内容被过滤，请检查输入或稍后重试');
+            }
+            console.error('API响应格式不支持:', data);
+            throw new Error('API响应格式不支持，无法提取回复内容');
+        }
+
+        // 检查内容是否有效
         if (!fullResponseText || fullResponseText.trim() === '') {
-            if (chatData.choices?.[0]?.finish_reason === 'content_filter') {
-                throw new Error('内容被过滤，请检查输入');
-            }
-            throw new Error('主模型回复内容为空');
+            throw new Error('AI回复内容为空，请稍后重试');
         }
-
-        // ==========================================
-        // 阶段二：副模型生成记忆表格 (完全隔离的上下文)
-        // ==========================================
-        let newMemoryTable = null;
-        try {
-            const secondaryModel = apiSettings.secondaryModel === 'sync_with_primary' ? apiSettings.model : apiSettings.secondaryModel;
-            
-            // 1. 构建副模型专属的系统提示词（包含人设和记忆表）
-            const memorySystemPrompt = window.promptBuilder.buildMemoryUpdatePrompt(contact, userProfile);
-            
-            // 2. 获取干净的历史记录数组
-            const cleanHistory = window.promptBuilder.buildMessageHistory(
-                currentContact, apiSettings, userProfile, contacts, contact, emojis, turnContext, false 
-            );
-
-            // 【核心修改】：将聊天记录“拍扁”成一段文本数据，避免使用 role: 'assistant' 让副模型入戏
-            let conversationText = "【最新对话记录】\n";
-            cleanHistory.forEach(msg => {
-                const senderName = msg.role === 'user' ? userProfile.name : contact.name;
-                conversationText += `${senderName}：${msg.content}\n`;
-            });
-            // 加上主模型刚刚生成的最新回复
-            conversationText += `${contact.name}：${fullResponseText}\n`;
-            const currentMemory = contact.memoryTableContent || window.promptBuilder.defaultMemoryTable;
-
-            // 3. 组装给副模型的请求：系统提示词 + 将动态记忆放在 User 消息末尾（提升前缀缓存稳定性）
-            const memoryMessages = [
-                { role: 'system', content: memorySystemPrompt },
-                { 
-                  role: 'user', 
-                  content: `请分析以下对话记录并提取情报。\n\n${conversationText}\n\n【输出要求】\n1. 严格按照系统提示：优先输出完整的 <memory_ops> … </memory_ops>（JSON 对象）。\n2. 为兼容旧版，请再输出 <memory_diff> … </memory_diff> 以更新下方 Markdown 记忆表；无表格变更时输出 <memory_diff>[]</memory_diff>。\n\n【当前记忆状态】：\n<current_memory>\n${currentMemory}\n</current_memory>` 
-                }
-            ];
-
-            // 4. 调用副模型 (降低 temperature 提高格式稳定性)
-            const memoryData = await window.apiService.callOpenAIAPI(
-                apiSettings.url, apiSettings.key, secondaryModel, memoryMessages, { temperature: 0.1 }, (apiSettings.timeout || 60) * 1000
-            );
-            
-            const memoryUsage = memoryData?.usage;
-            if (memoryUsage) {
-                const memoryPromptTokens = memoryUsage.prompt_tokens || 0;
-                const memoryCachedTokens = memoryUsage.prompt_cache_hit_tokens ||
-                    (memoryUsage.prompt_tokens_details && memoryUsage.prompt_tokens_details.cached_tokens) || 0;
-                const memoryHitRate = memoryPromptTokens > 0 ? ((memoryCachedTokens / memoryPromptTokens) * 100).toFixed(1) : '0.0';
-                console.log(`[副模型缓存统计] 命中率: ${memoryHitRate}%`);
-            }
-
-            const memoryResponseText = memoryData.choices?.[0]?.message?.content || '';
-
-            let memoryOpsApplied = false;
-            let memoryOps = null;
-            try {
-                memoryOps = parseMemoryOps(memoryResponseText);
-            } catch (opsParseErr) {
-                memoryOps = null;
-            }
-
-            if (memoryOps) {
-                console.log('[结构化记忆] 检测到 memory_ops');
-                try {
-                    const opsEpisode = {
-                        id: generateMemoryId('episode'),
-                        contactId: contact.id,
-                        type: 'memory_update',
-                        content: conversationText,
-                        source: 'secondary_model_memory_ops',
-                        createdAt: Date.now(),
-                        messageIds: [],
-                        metadata: {
-                            memoryOps,
-                            oldMemoryLength: currentMemory.length
-                        }
-                    };
-                    const opsEpSaved = await saveMemoryEpisode(opsEpisode);
-                    if (opsEpSaved) {
-                        console.log('[结构化记忆] memory_ops 已保存 episode:', opsEpisode.id);
-                        const opsResult = await applyMemoryOps(contact, memoryOps, opsEpisode.id);
-                        console.log('[结构化记忆] memory_ops 已应用:', opsResult);
-                        console.log('[结构化记忆] 新增 facts:', opsResult.addedFacts.length);
-                        console.log('[结构化记忆] 失效 facts:', opsResult.invalidatedFacts.length);
-                        memoryOpsApplied = true;
-                    }
-                } catch (opsFlowErr) {
-                    console.error('[结构化记忆] memory_ops 流程失败（不影响聊天）:', opsFlowErr);
-                }
-            }
-            
-            // 提取增量更新标签 (加上了上一次我们写的防弹衣正则清理)
-            const diffRegex = /<memory_diff>([\s\S]*?)<\/memory_diff>/;
-            const diffMatch = memoryResponseText.match(diffRegex);
-
-            if (diffMatch) {
-                console.log(">>> [副模型] 检测到【增量更新】指令，开始清理...");
-                let diffJson = diffMatch[1].trim();
-                diffJson = diffJson.replace(/^```json\s*/i, '');
-                diffJson = diffJson.replace(/^```\s*/, '');
-                diffJson = diffJson.replace(/```\s*$/, '');
-                diffJson = diffJson.trim();
-                
-                console.log(">>> [副模型] 清理后的干净 JSON:", diffJson);
-
-                let diffArray = null;
-                try {
-                    diffArray = JSON.parse(diffJson);
-                } catch (parseErr) {
-                    console.warn('[结构化记忆] diff JSON 解析失败，跳过结构化存储:', parseErr);
-                }
-
-                newMemoryTable = MemoryPatcher.applyDiff(currentMemory, diffJson);
-
-                if (memoryOpsApplied) {
-                    console.log('[结构化记忆] 已应用 memory_ops，本轮跳过 memory_diff 旁路 facts 保存');
-                }
-
-                if (Array.isArray(diffArray)) {
-                    try {
-                        await invalidateFactsFromMemoryDiffDelete(diffArray, contact);
-                    } catch (invErr) {
-                        console.error('[结构化记忆] memory_diff delete 失效流程异常（不影响聊天）:', invErr);
-                    }
-                }
-
-                if (!memoryOpsApplied && diffArray !== null) {
-                    if (!Array.isArray(diffArray)) {
-                        console.warn('[结构化记忆] diff 解析结果不是数组，跳过结构化存储');
-                    } else {
-                        const episode = {
-                            id: generateMemoryId('episode'),
-                            contactId: contact.id,
-                            type: 'memory_update',
-                            content: conversationText,
-                            source: 'secondary_model_memory_diff',
-                            createdAt: Date.now(),
-                            messageIds: [],
-                            metadata: {
-                                rawDiff: diffArray,
-                                oldMemoryLength: currentMemory.length,
-                                newMemoryLength: newMemoryTable != null ? newMemoryTable.length : 0
-                            }
-                        };
-                        try {
-                            const epSaved = await saveMemoryEpisode(episode);
-                            if (epSaved) {
-                                console.log('[结构化记忆] 已保存 episode:', episode.id);
-                                const facts = convertMemoryDiffToFacts(diffArray, contact, episode.id);
-                                const factsSaved = await saveMemoryFacts(facts);
-                                if (factsSaved) {
-                                    console.log('[结构化记忆] 已保存 facts 数量:', facts.length);
-                                }
-                            }
-                        } catch (structuredErr) {
-                            console.error('[结构化记忆] 旁路写入异常:', structuredErr);
-                        }
-                    }
-                }
-            } else if (!memoryOps) {
-                console.log(">>> [副模型] 未检测到合规的增量标签，原样输出为：", memoryResponseText);
-            }
-        } catch (memError) {
-            console.error(">>> [副模型] 后台提取记忆失败，跳过此次更新:", memError);
-        }
-
-        // ==========================================
-        // 阶段三：处理聊天气泡、表情、红包
-        // ==========================================
-        // 清理一下可能被主模型意外带入的 memory 标签 (防漏)
-        let cleanedResponse = fullResponseText.replace(/<memory_diff>[\s\S]*?<\/memory_diff>/g, '').replace(/<memory_table>[\s\S]*?<\/memory_table>/g, '').trim();
-
-        const replies = splitAIReplyIntoBubbleLines(cleanedResponse, MIN_AI_BUBBLE_COUNT);
-        const processedReplies = [];
-        const normalizedReasoning = typeof reasoningContent === 'string' ? reasoningContent.trim() : '';
         
-        const emojiTagRegex = /^<emoji>(.*?)<\/emoji>$/; 
+        
+        let chatRepliesText = fullResponseText;
+
+        // 群聊模式：如果是群聊，直接返回完整内容，不进行分割
+        let replies;
+        if (currentContact && currentContact.type === 'group') {
+            replies = [chatRepliesText.trim()];
+        } else {
+            // 处理回复分割（仅用于私聊）
+            // 首先检查是否有 ||| 分隔符
+            if (chatRepliesText.includes('|||')) {
+                replies = chatRepliesText.split('|||').map(r => r.trim()).filter(r => r);
+            } 
+            // 如果没有 |||，检查是否有 || 分隔符
+            else if (chatRepliesText.includes('||')) {
+                replies = chatRepliesText.split('||').map(r => r.trim()).filter(r => r);
+            }
+            // 如果都没有，按换行符分割
+            else {
+                replies = chatRepliesText.split('\n').map(r => r.trim()).filter(r => r);
+            }
+        }
+        const processedReplies = [];
+        
+        // 处理特殊消息类型（表情、红包等）
+        const emojiNameRegex = /^\[(?:emoji|发送了表情)[:：]([^\]]+)\]$/;
         const redPacketRegex = /^\[red_packet:({.*})\]$/;
 
-        for (const [index, reply] of replies.entries()) {
-            const emojiMatch = reply.match(emojiTagRegex);
+        for (const reply of replies) {
+            const emojiMatch = reply.match(emojiNameRegex);
             const redPacketMatch = reply.match(redPacketRegex);
-            const reasoningForReply = index === 0 ? normalizedReasoning : ''; // 思考过程只挂载在第一条消息上
 
             if (emojiMatch) {
-                const foundEmoji = emojis.find(e => e.meaning === emojiMatch[1]);
-                processedReplies.push({ 
-                    type: foundEmoji ? 'emoji' : 'text', 
-                    content: foundEmoji ? foundEmoji.meaning : reply, 
-                    reasoning: reasoningForReply 
-                });
+                const emojiName = emojiMatch[1];
+                const foundEmoji = emojis.find(e => e.tag === emojiName || e.meaning === emojiName);
+                if (foundEmoji) {
+                    const content = foundEmoji.tag ? `[emoji:${foundEmoji.tag}]` : foundEmoji.url;
+                    processedReplies.push({ type: 'emoji', content: content });
+                } else {
+                    processedReplies.push({ type: 'text', content: reply });
+                }
             } else if (redPacketMatch) {
                 try {
                     const packetData = JSON.parse(redPacketMatch[1]);
-                    if (typeof packetData.amount === 'number') {
-                         processedReplies.push({ type: 'red_packet', content: JSON.stringify(packetData), reasoning: reasoningForReply });
-                         continue;
+                    if (typeof packetData.amount === 'number' && typeof packetData.message === 'string') {
+                         processedReplies.push({ type: 'red_packet', content: JSON.stringify(packetData) });
+                    } else {
+                         processedReplies.push({ type: 'text', content: reply });
                     }
-                } catch (e) {}
-                processedReplies.push({ type: 'text', content: reply, reasoning: reasoningForReply });
+                } catch (e) {
+                    processedReplies.push({ type: 'text', content: reply });
+                }
             } else {
-                processedReplies.push({ type: 'text', content: reply, reasoning: reasoningForReply });
+                processedReplies.push({ type: 'text', content: reply });
             }
         }
         
-        return { replies: processedReplies, newMemoryTable };
+        
+        return { replies: processedReplies };
 
     } catch (error) {
-        console.error('callAPI 调用失败:', error);
-        throw error;
+        console.error('callAPI错误详情:', {
+            errorName: error.name,
+            errorMessage: error.message,
+            errorStack: error.stack,
+            contact: contact ? {
+                id: contact.id,
+                name: contact.name,
+                type: contact.type
+            } : null,
+            turnContextLength: turnContext ? turnContext.length : 0,
+            apiSettings: {
+                url: apiSettings?.url ? apiSettings.url.substring(0, 50) + '...' : 'not set',
+                hasKey: !!apiSettings?.key,
+                model: apiSettings?.model || 'not set'
+            },
+            timestamp: new Date().toISOString(),
+            networkStatus: navigator.onLine ? 'online' : 'offline'
+        });
+        // 不再抛出错误，让showApiError处理重试逻辑
+        showApiError(error);
+        return null; // 返回null表示API调用失败
     }
 }
 
 
-/**
- * [MODIFIED] 直接从前端测试API连接，不再通过服务器代理。
- */
 async function testApiConnection() {
-    const url = document.getElementById('apiUrl').value;
-    const key = document.getElementById('apiKey').value;
-    if (!url || !key) {
-        showToast('请填写完整信息');
-        return;
-    }
-
-    const primarySelect = document.getElementById('primaryModelSelect');
-    const secondarySelect = document.getElementById('secondaryModelSelect');
+    // 声明变量，使其在try-catch块外可访问
+    let enabledKey = '';
+    let keyElement = null; // 存储对应的DOM元素
     
-    primarySelect.innerHTML = '<option>连接中...</option>';
-    secondarySelect.innerHTML = '<option>连接中...</option>';
-    primarySelect.disabled = true;
-    secondarySelect.disabled = true;
-
     try {
-        // [MODIFIED] 直接调用前端API服务
-        const data = await window.apiService.testConnection(url, key);
+        const url = document.getElementById('apiUrl')?.value?.trim();
         
-        // 尝试从API响应中获取模型列表，如果失败则默认为空数组
-        const apiModels = data.data ? data.data.map(m => m.id) : [];
-
-        // 【核心修正】: 合并来自API的模型列表和本地为该URL保存的自定义模型列表
-        
-        // 1. 获取当前正在测试的API URL
-        const currentUrl = url; // 直接使用函数参数 'url'，更准确
-        
-        // 2. 从全局变量 customModelsByUrl 中查找已为该URL保存的自定义模型
-        const customSavedModels = customModelsByUrl[currentUrl] || [];
-        console.log(`[模型加载] API返回模型: ${apiModels.length}个, 为URL(${currentUrl})加载的本地模型: ${customSavedModels.length}个`);
-
-        // 3. 使用Set数据结构来合并两个列表并自动去重，然后转回数组并排序
-        const combinedModels = [...new Set([...apiModels, ...customSavedModels])].sort();
-        console.log(`[模型加载] 合并后总模型数: ${combinedModels.length}个`);
-
-
-        if (combinedModels.length === 0) {
-            showToast('连接成功，但未找到任何可用模型');
-            primarySelect.innerHTML = '<option>无可用模型</option>';
-            secondarySelect.innerHTML = '<option>无可用模型</option>';
-            // 即使没有模型，也要启用选择器，以便用户可以手动添加
-            primarySelect.disabled = false;
-            secondarySelect.disabled = false;
+        if (!url) {
+            showToast('请填写API URL');
             return;
         }
-
-        // 3. 使用合并后的最终列表来填充下拉框
-        // 填充主要模型
-        primarySelect.innerHTML = '';
-        combinedModels.forEach(modelId => {
-            const option = document.createElement('option');
-            option.value = modelId;
-            option.textContent = modelId;
-            primarySelect.appendChild(option);
-        });
-        // 尝试恢复之前选择的模型
-        primarySelect.value = apiSettings.model; 
-
-        // 填充次要模型
-        secondarySelect.innerHTML = '<option value="sync_with_primary">与主模型保持一致</option>';
-        combinedModels.forEach(modelId => {
-            const option = document.createElement('option');
-            option.value = modelId;
-            option.textContent = modelId;
-            secondarySelect.appendChild(option);
-        });
-        // 尝试恢复之前选择的模型
-        secondarySelect.value = apiSettings.secondaryModel || 'sync_with_primary';
         
-        primarySelect.disabled = false;
-        secondarySelect.disabled = false;
-        showToast('连接成功，模型列表已更新');
+        // 检查主key是否有值
+        const mainKey = document.getElementById('apiKey')?.value?.trim();
+        if (mainKey) {
+            enabledKey = mainKey; // 默认使用主key
+            keyElement = document.getElementById('apiKey');
+        }
+        
+        // 检查是否有额外key被启用
+        const enabledButtons = document.querySelectorAll('.key-enable-btn[data-enabled="true"]');
+        if (enabledButtons.length > 0) {
+            const enabledButton = enabledButtons[0];
+            const row = enabledButton.closest('.api-provider-row');
+            const keyInput = row?.querySelector('.api-key-input');
+            if (keyInput && keyInput.value.trim()) {
+                enabledKey = keyInput.value.trim();
+                keyElement = keyInput;
+            }
+        }
+        
+        if (!enabledKey) {
+            showToast('请填写至少一个API Key');
+            return;
+        }
+        
+        console.log('测试连接使用的key前8位:', enabledKey.substring(0, 8) + '...');
+
+        // 测试连接
+        console.log(`[测试连接] window.apiService存在: ${!!window.apiService}`);
+        console.log(`[测试连接] window.apiService.testConnection类型: ${typeof window.apiService?.testConnection}`);
+        
+        if (!window.apiService) {
+            // 尝试重新初始化APIService
+            if (typeof APIService !== 'undefined') {
+                console.log('[测试连接] 重新初始化APIService');
+                window.apiService = new APIService();
+            } else {
+                throw new Error('APIService类未定义，请检查api.js是否正确加载');
+            }
+        }
+        
+        if (typeof window.apiService.testConnection !== 'function') {
+            console.error('window.apiService对象:', window.apiService);
+            console.error('可用方法:', Object.getOwnPropertyNames(window.apiService));
+            throw new Error('testConnection方法不存在');
+        }
+        
+        const data = await window.apiService.testConnection(url, enabledKey);
+        const models = data.data ? data.data.map(m => m.id).sort() : [];
+
+        // 连接成功，但不重写模型选择框
+        if (models.length === 0) {
+            showToast('连接成功，但未找到可用模型');
+        } else {
+            showToast(`连接成功，找到 ${models.length} 个可用模型`);
+        }
+        
+        // 只缓存模型列表，不更新UI
+        if (models && models.length > 0 && window.apiConfigManager) {
+            const activeConfig = await window.apiConfigManager.getActiveConfig();
+            if (activeConfig) {
+                window.apiConfigManager.availableModels.set(activeConfig.id, models);
+                console.log(`[测试连接] 已缓存 ${models.length} 个模型到配置 ${activeConfig.id}`);
+            }
+        }
 
     } catch (error) {
-        primarySelect.innerHTML = '<option>连接失败</option>';
-        secondarySelect.innerHTML = '<option>连接失败</option>';
-        showToast(error.message);
+        console.error('测试连接失败:', error);
+        
+        // 标记测试失败的key为失败状态，并传递具体错误信息
+        if (keyElement) {
+            console.log('标记key为失败状态:', keyElement.id || 'secondary key');
+            markKeyAsFailed(keyElement, '连接失败: ' + error.message);
+        } else {
+            console.error('无法标记key为失败状态: keyElement为null');
+            showToast('连接失败: ' + error.message);
+        }
     }
 }
 
@@ -5744,132 +6224,1284 @@ function handlePrimaryModelChange() {
     const primaryModel = document.getElementById('primaryModelSelect').value;
     const secondarySelect = document.getElementById('secondaryModelSelect');
     
+    // 立即更新全局设置中的模型
+    if (window.apiSettings) {
+        window.apiSettings.model = primaryModel;
+        console.log('主模型已更新为:', primaryModel);
+    }
+    
     // 如果次要模型设置为"同步"，则在数据层面更新它
     if (apiSettings.secondaryModel === 'sync_with_primary') {
         // 不需要直接修改UI，保存时会处理
     }
 }
 
-/**
- * 辅助函数：将一个模型ID添加到主/次模型选择器中，如果它不存在的话
- * @param {string} modelId 要添加的模型ID
- */
-function addModelToSelectors(modelId) {
-    const primarySelect = document.getElementById('primaryModelSelect');
-    const secondarySelect = document.getElementById('secondaryModelSelect');
-
-    // 检查主选择器中是否已存在该选项
-    if (!primarySelect.querySelector(`option[value="${modelId}"]`)) {
-        const option1 = document.createElement('option');
-        option1.value = modelId;
-        option1.textContent = modelId;
-        primarySelect.appendChild(option1);
-    }
-
-    // 检查次选择器中是否已存在该选项
-    if (!secondarySelect.querySelector(`option[value="${modelId}"]`)) {
-        const option2 = document.createElement('option');
-        option2.value = modelId;
-        option2.textContent = modelId;
-        secondarySelect.appendChild(option2);
+async function saveApiConfig(event) {
+    event.preventDefault();
+    
+    try {
+        if (!window.apiConfigManager) {
+            throw new Error('配置管理器未初始化');
+        }
+        
+        // 获取表单数据
+        const getElementValue = (id, defaultValue = '') => {
+            const element = document.getElementById(id);
+            return element ? element.value.trim() : defaultValue;
+        };
+        
+        const configName = getElementValue('configName');
+        const apiUrl = getElementValue('apiUrl');
+        const apiKey = getElementValue('apiKey');
+        const timeout = parseInt(getElementValue('apiTimeout')) || 60;
+        
+        // 验证必填字段
+        if (!configName) {
+            showToast('请输入配置名称');
+            return;
+        }
+        
+        if (!apiUrl || !apiKey) {
+            showToast('请输入API URL和API Key');
+            return;
+        }
+        
+        // 构建完整的API Keys数组（包括主key和所有副key）
+        const allApiKeys = [];
+        
+        // 首先添加主key（始终在index 0）
+        const mainKeyStatus = document.querySelector('.main-key-status');
+        const mainKeyEnabled = mainKeyStatus ? (mainKeyStatus.dataset.enabled === 'true' && mainKeyStatus.dataset.status === 'enabled') : true;
+        
+        allApiKeys.push({
+            key: apiKey,
+            name: '主Key',
+            enabled: mainKeyEnabled,
+            index: 0
+        });
+        
+        // 然后添加所有副key
+        const providerRows = document.querySelectorAll('.api-provider-row');
+        providerRows.forEach((row, index) => {
+            const keyInput = row.querySelector('.api-key-input');
+            const enableButton = row.querySelector('.key-enable-btn');
+            if (keyInput && keyInput.value.trim()) {
+                allApiKeys.push({
+                    key: keyInput.value.trim(),
+                    name: `Key ${index + 1}`,
+                    enabled: enableButton ? (enableButton.dataset.enabled === 'true' && enableButton.dataset.status === 'enabled') : false,
+                    index: index + 1
+                });
+            }
+        });
+        
+        // 获取模型选择
+        const primaryModel = getElementValue('primaryModelSelect');
+        const secondaryModel = getElementValue('secondaryModelSelect');
+        
+        // 获取上下文消息数量
+        const contextMessageCount = parseInt(getElementValue('contextSlider')) || 10;
+        
+        // 检查是否为新配置（通过按钮状态或其他标识判断）
+        const isNewConfig = window.currentConfigState === 'new';
+        const configSelector = document.getElementById('configSelector');
+        const currentConfigId = isNewConfig ? null : configSelector?.value || null;
+        
+        // 构建配置数据 - 保持原有key结构，只更新启用状态
+        const configData = {
+            configId: currentConfigId,
+            configName,
+            url: apiUrl,
+            key: apiKey, // 保持主key不变
+            model: primaryModel,
+            secondaryModel: secondaryModel,
+            contextMessageCount,
+            timeout,
+            apiKeys: allApiKeys // 使用完整的apiKeys结构
+        };
+        
+        console.log('[API配置保存] 准备保存的配置数据:', {
+            key: apiKey.substring(0, 10) + '...',
+            apiKeysCount: allApiKeys.length,
+            enabledKeys: allApiKeys.filter(k => k.enabled).map(k => ({
+                index: k.index, 
+                keyPrefix: k.key.substring(0, 10) + '...'
+            }))
+        });
+        
+        // 保存配置
+        const savedConfig = await window.apiConfigManager.saveConfig(configData);
+        
+        // 如果是新配置，切换到新配置
+        if (!currentConfigId || currentConfigId === '') {
+            await window.apiConfigManager.switchToConfig(savedConfig.id);
+        }
+        
+        // 重新加载配置选择器
+        await loadConfigSelector();
+        
+        // 设置选中的配置
+        if (configSelector) {
+            configSelector.value = savedConfig.id;
+        }
+        
+        // 重置新配置状态
+        window.currentConfigState = null;
+        
+        showToast('API配置保存成功');
+        
+        // 显示成功提示并隐藏流程提醒
+        showConfigSaveSuccess();
+        
+        // 立即更新全局API设置
+        await ensureApiConfigIsUpdated();
+        
+    } catch (error) {
+        console.error('保存API配置失败:', error);
+        showToast('保存API配置失败: ' + error.message);
     }
 }
 
-/**
- * 核心功能：手动检查一个模型是否可用
- */
-async function checkManualModel() {
-    const apiUrl = document.getElementById('apiUrl').value.trim();
-    const apiKey = document.getElementById('apiKey').value.trim();
-    const modelId = document.getElementById('manualModelInput').value.trim();
-
-    if (!apiUrl || !apiKey || !modelId) {
-        showToast('API URL, Key 和模型名称都不能为空');
+async function saveAppSettings(event) {
+    event.preventDefault();
+    
+    // 验证用户流程完整性
+    if (!validateUserFlow()) {
         return;
     }
-
-    const checkBtn = document.getElementById('checkModelBtn');
-    const originalBtnText = checkBtn.textContent;
-    checkBtn.disabled = true;
-    checkBtn.textContent = '检查中...';
-
+    
     try {
-        // 使用你已有的 apiService 发送一个极简的测试请求
-        await window.apiService.callOpenAIAPI(
-            apiUrl,
-            apiKey,
-            modelId,
-            [{ role: "user", content: "test" }], // 一个极简的测试消息
-            { max_tokens: 1 }, // 我们只需要成功响应，不需要内容
-            15000 // 设置15秒超时
-        );
-
-        // 如果请求成功，就将这个模型添加到下拉列表中
-        addModelToSelectors(modelId);
-        showToast(`模型 "${modelId}" 可用，已添加到列表！`);
+        // 获取表单数据
+        const getElementValue = (id, defaultValue = '') => {
+            const element = document.getElementById(id);
+            return element ? element.value.trim() : defaultValue;
+        };
         
-        // ================== 新增代码开始 ==================
-        // 确保持久化这个新模型
-        if (!customModelsByUrl[apiUrl]) {
-            customModelsByUrl[apiUrl] = []; // 如果这个URL还没有条目，则初始化一个数组
-        }
-        if (!customModelsByUrl[apiUrl].includes(modelId)) {
-            customModelsByUrl[apiUrl].push(modelId); // 添加新模型
-            await saveDataToDB(); // 立即保存到数据库
-            console.log(`已为URL: ${apiUrl} 保存新模型: ${modelId}`);
-        }
-        // ================== 新增代码结束 ==================
+        const primaryConfig = getElementValue('primaryConfigSelect');
+        const primaryModel = getElementValue('primaryModelSelect');
+        const secondaryConfig = getElementValue('secondaryConfigSelect', 'sync_with_primary');
+        const secondaryModel = getElementValue('secondaryModelSelect', 'sync_with_primary');
+        const contextMessageCount = parseInt(getElementValue('contextSlider')) || 10;
+        const minimaxGroupId = getElementValue('minimaxGroupId');
+        const minimaxApiKey = getElementValue('minimaxApiKey');
+        const unsplashKey = getElementValue('unsplashApiKey');
         
-        document.getElementById('manualModelInput').value = ''; // 成功后清空输入框
-
+        // 保存应用设置到localStorage（这些不属于API配置）
+        localStorage.setItem('primaryModelConfig', primaryConfig);
+        localStorage.setItem('primaryModel', primaryModel);
+        localStorage.setItem('secondaryModelConfig', secondaryConfig);
+        localStorage.setItem('secondaryModel', secondaryModel);
+        localStorage.setItem('contextMessageCount', contextMessageCount.toString());
+        localStorage.setItem('minimaxGroupId', minimaxGroupId);
+        localStorage.setItem('minimaxApiKey', minimaxApiKey);
+        
+        // 保存 Unsplash API Key
+        if (unsplashKey) {
+            localStorage.setItem('forumUnsplashApiKey', unsplashKey);
+            localStorage.setItem('unsplashApiKey', unsplashKey);
+        } else {
+            localStorage.removeItem('forumUnsplashApiKey');
+            localStorage.removeItem('unsplashApiKey');
+        }
+        
+        // 重新初始化图片关键词生成器
+        if (window.imageKeywordGenerator && window.apiService) {
+            window.imageKeywordGenerator.init(window.apiSettings, window.apiService);
+            console.log('图片关键词生成器已更新配置');
+        }
+        
+        updateContextIndicator();
+        showToast('应用设置保存成功');
+        
+        // 显示流程完成消息
+        showFlowCompletionMessage();
+        
     } catch (error) {
-        console.error(`检查模型 ${modelId} 失败:`, error);
-        showToast(`模型 "${modelId}" 不可用或检查失败`);
-    } finally {
-        checkBtn.disabled = false;
-        checkBtn.textContent = originalBtnText;
+        console.error('保存应用设置失败:', error);
+        showToast('保存应用设置失败: ' + error.message);
     }
 }
 
-async function saveApiSettings(event) {
-    event.preventDefault();
-    apiSettings.url = document.getElementById('apiUrl').value;
-    apiSettings.key = document.getElementById('apiKey').value;
-    apiSettings.model = document.getElementById('primaryModelSelect').value;
-    apiSettings.secondaryModel = document.getElementById('secondaryModelSelect').value;
-    apiSettings.contextMessageCount = Math.min(
-        CONTEXT_MESSAGE_MAX,
-        Math.max(1, parseInt(document.getElementById('contextSlider').value, 10) || 10)
-    );
-    apiSettings.timeout = parseInt(document.getElementById('apiTimeout').value) || 60;
-    
-    // 【修改点 4】: 保存 Minimax 的设置
-    // 假设你的HTML中输入框的ID是 minimaxGroupId 和 minimaxApiKey
-    apiSettings.minimaxGroupId = document.getElementById('minimaxGroupId').value.trim();
-    apiSettings.minimaxApiKey = document.getElementById('minimaxApiKey').value.trim();
-    
-    // 【新增】保存智谱 GLM API Key
-    apiSettings.glmApiKey = document.getElementById('glmApiKey').value.trim();
+async function loadApiConfigSelectorsForModels() {
+    try {
+        if (!window.apiConfigManager) return;
+        
+        const configs = await window.apiConfigManager.getAllConfigs();
+        
+        // 为主要模型和次要模型的配置选择器添加选项
+        const primaryConfigSelect = document.getElementById('primaryConfigSelect');
+        const secondaryConfigSelect = document.getElementById('secondaryConfigSelect');
+        
+        if (primaryConfigSelect) {
+            primaryConfigSelect.innerHTML = '<option value="">选择API配置</option>';
+            configs.forEach(config => {
+                const option = document.createElement('option');
+                option.value = config.id;
+                option.textContent = config.configName;
+                primaryConfigSelect.appendChild(option);
+            });
+        }
+        
+        if (secondaryConfigSelect) {
+            secondaryConfigSelect.innerHTML = '<option value="">选择API配置</option><option value="sync_with_primary">与主模型保持一致</option>';
+            configs.forEach(config => {
+                const option = document.createElement('option');
+                option.value = config.id;
+                option.textContent = config.configName;
+                secondaryConfigSelect.appendChild(option);
+            });
+        }
+        
+        // 加载保存的选择
+        const savedPrimaryConfig = localStorage.getItem('primaryModelConfig');
+        const savedPrimaryModel = localStorage.getItem('primaryModel');
+        const savedSecondaryConfig = localStorage.getItem('secondaryModelConfig');
+        const savedSecondaryModel = localStorage.getItem('secondaryModel');
+        
+        if (savedPrimaryConfig && primaryConfigSelect) {
+            primaryConfigSelect.value = savedPrimaryConfig;
+            await loadModelsForConfig('primaryConfigSelect', 'primaryModelSelect');
+            if (savedPrimaryModel) {
+                const primaryModelSelect = document.getElementById('primaryModelSelect');
+                if (primaryModelSelect) {
+                    primaryModelSelect.value = savedPrimaryModel;
+                }
+            }
+        }
+        
+        if (savedSecondaryConfig && secondaryConfigSelect) {
+            secondaryConfigSelect.value = savedSecondaryConfig;
+            if (savedSecondaryConfig !== 'sync_with_primary') {
+                await loadModelsForConfig('secondaryConfigSelect', 'secondaryModelSelect');
+                if (savedSecondaryModel) {
+                    const secondaryModelSelect = document.getElementById('secondaryModelSelect');
+                    if (secondaryModelSelect) {
+                        secondaryModelSelect.value = savedSecondaryModel;
+                    }
+                }
+            }
+        }
+        
+    } catch (error) {
+        console.error('加载API配置选择器失败:', error);
+    }
+}
 
-    // 保存计费标准（元/百万Token）
-    const readPrice = (id, fallback) => {
-        const el = document.getElementById(id);
-        const raw = el ? String(el.value ?? '').trim() : '';
-        const n = parseFloat(raw);
-        return Number.isFinite(n) ? n : fallback;
-    };
-    apiSettings.priceHit = readPrice('priceHit', 1.0);
-    apiSettings.priceMiss = readPrice('priceMiss', 12.0);
-    apiSettings.priceOut = readPrice('priceOut', 24.0);
-    // 保存开关状态
-    const showUsageStatsToggle = document.getElementById('showUsageStatsToggle');
-    apiSettings.showUsageStats = showUsageStatsToggle ? showUsageStatsToggle.checked : true;
+// 检查API Key是否重复
+function checkKeyDuplicate(keyValue, excludeInput = null) {
+    // 获取主key
+    const mainKeyInput = document.getElementById('apiKey');
+    if (mainKeyInput !== excludeInput && mainKeyInput.value.trim() === keyValue) {
+        return true;
+    }
     
-    await saveDataToDB();
-    closeModal('apiSettingsModal');
-    updateContextIndicator();
-    updateStatsUI();
-    showToast('设置已保存');
+    // 获取所有副key
+    const secondaryKeyInputs = document.querySelectorAll('.api-provider-row .api-key-input');
+    for (const input of secondaryKeyInputs) {
+        if (input !== excludeInput && input.value.trim() === keyValue) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// 处理API Key输入，检查重复
+function handleApiKeyInput(input, event) {
+    const keyValue = input.value.trim();
+    
+    if (keyValue && checkKeyDuplicate(keyValue, input)) {
+        // 如果有重复，显示警告
+        input.style.borderColor = '#dc3545';
+        showToast('API Key不能重复！', 'warning');
+        
+        // 可选：清除重复的值
+        // input.value = '';
+    } else {
+        // 没有重复，恢复正常边框
+        input.style.borderColor = '';
+    }
+}
+
+// 检查所有API Key是否有重复
+function checkAllApiKeysForDuplicates() {
+    const allKeyInputs = document.querySelectorAll('.api-key-input');
+    const keyMap = new Map(); // 存储key值和对应的输入框
+    
+    // 重置所有边框
+    allKeyInputs.forEach(input => {
+        input.style.borderColor = '';
+    });
+    
+    // 检查重复
+    let hasDuplicates = false;
+    allKeyInputs.forEach(input => {
+        const keyValue = input.value.trim();
+        if (!keyValue) return;
+        
+        if (keyMap.has(keyValue)) {
+            // 发现重复
+            hasDuplicates = true;
+            input.style.borderColor = '#dc3545';
+            keyMap.get(keyValue).style.borderColor = '#dc3545';
+        } else {
+            keyMap.set(keyValue, input);
+        }
+    });
+    
+    if (hasDuplicates) {
+        showToast('检测到重复的API Keys，请检查！', 'warning');
+    }
+}
+
+function addProviderRow() {
+    try {
+        console.log('添加新的API Key行');
+        
+        // 找到API配置表单中的基本设置部分
+        const configSection = document.querySelector('.config-section');
+        if (!configSection) {
+            console.error('未找到配置部分容器');
+            showToast('无法添加新行：未找到配置容器');
+            return;
+        }
+        
+        // 计算这是第几个Key（从1开始，0是主Key）
+        const existingRows = document.querySelectorAll('.api-provider-row').length;
+        const keyIndex = existingRows + 1;
+        
+        // 创建新的API Key行
+        const newKeyRow = document.createElement('div');
+        newKeyRow.className = 'form-group api-provider-row';
+        newKeyRow.innerHTML = `
+            <div class="key-header">
+                <label class="form-label">API Key ${keyIndex}</label>
+                <button type="button" class="remove-provider-btn" onclick="removeProviderRow(this, event)" title="移除此Key">×</button>
+            </div>
+            <div class="compact-key-row additional-key-row">
+                <input type="password" class="form-input api-key-input compact-key-input" placeholder="输入API Key" oninput="updateKeyStats(this); handleApiKeyInput(this, event)">
+                <button type="button" class="key-enable-btn" onclick="toggleKeyEnable(this)" data-enabled="false" data-status="disabled" title="点击启用此Key">⚪</button>
+                <div class="key-stats-compact">
+                    <div class="key-masked-compact">未设置</div>
+                    <div class="stats-compact">
+                        <span class="calls-count">0次</span>/<span class="success-rate">0%</span>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // 找到现有API Key输入框的父容器，在其后插入新行
+        const apiKeyGroup = document.querySelector('#apiKey').closest('.form-group');
+        if (apiKeyGroup && apiKeyGroup.parentNode) {
+            apiKeyGroup.parentNode.insertBefore(newKeyRow, apiKeyGroup.nextSibling);
+            console.log('成功添加新的API Key行');
+        } else {
+            console.error('未找到API Key输入框容器');
+            showToast('无法添加新行：未找到API Key容器');
+        }
+        
+    } catch (error) {
+        console.error('添加API Key行失败:', error);
+        showToast('添加新行失败: ' + error.message);
+    }
+}
+
+function removeProviderRow(button, event) {
+    try {
+        // 阻止事件冒泡
+        if (event) {
+            event.stopPropagation();
+            event.preventDefault();
+        }
+        
+        const row = button.closest('.api-provider-row');
+        if (row) {
+            row.remove();
+            console.log('移除API Key行成功');
+            showToast('已移除API Key行');
+        }
+    } catch (error) {
+        console.error('移除API Key行失败:', error);
+        showToast('移除行失败: ' + error.message);
+    }
+}
+
+// 标记API Key为失败状态
+async function markKeyAsFailed(keyElement, errorMessage = null) {
+    try {
+        if (!keyElement) {
+            console.error('markKeyAsFailed: keyElement为null');
+            return;
+        }
+        
+        console.log('markKeyAsFailed: 开始处理key', keyElement.id || 'secondary key');
+        
+        // 判断是主key还是额外key
+        if (keyElement.id === 'apiKey') {
+            // 主key - 使用主key状态按钮
+            const mainKeyStatusBtn = document.querySelector('.main-key-status');
+            if (mainKeyStatusBtn) {
+                console.log('markKeyAsFailed: 找到主key状态按钮，设置为失败状态');
+                mainKeyStatusBtn.dataset.status = 'failed';
+                mainKeyStatusBtn.dataset.enabled = 'false';
+                mainKeyStatusBtn.style.backgroundColor = 'white'; // 白色背景
+                mainKeyStatusBtn.textContent = '🔴'; // 红色圆圈
+                // 更新全局设置
+                if (window.apiConfigManager) {
+                    await window.apiConfigManager.setKeyEnabled('', false); // 清除启用的key
+                }
+            } else {
+                console.error('markKeyAsFailed: 未找到主key状态按钮(.main-key-status)');
+            }
+        } else {
+            // 额外key - 找到对应的状态按钮
+            const row = keyElement.closest('.api-provider-row');
+            if (row) {
+                const statusBtn = row.querySelector('.key-enable-btn');
+                if (statusBtn) {
+                    console.log('markKeyAsFailed: 找到副key状态按钮，设置为失败状态');
+                    statusBtn.dataset.status = 'failed';
+                    statusBtn.dataset.enabled = 'false';
+                    statusBtn.style.backgroundColor = 'white'; // 白色背景
+                    statusBtn.textContent = '🔴'; // 红色圆圈
+                    // 如果这个key是启用状态，需要更新配置
+                    const keyValue = keyElement.value.trim();
+                    if (keyValue && window.apiConfigManager) {
+                        try {
+                            // 获取当前配置
+                            const currentConfig = await window.apiConfigManager.getActiveConfig();
+                            if (currentConfig) {
+                                const currentEnabled = window.apiConfigManager.getEnabledKey(currentConfig);
+                                if (currentEnabled === keyValue) {
+                                    // 如果被标记失败的是当前启用的key，清除启用状态
+                                    if (keyElement.id === 'apiKey') {
+                                        // 主key，不需要特殊处理
+                                    } else {
+                                        // 副key，禁用它
+                                        statusBtn.dataset.enabled = 'false';
+                                    }
+                                }
+                            }
+                        } catch (error) {
+                            console.warn('更新配置状态失败:', error);
+                        }
+                    }
+                } else {
+                    console.error('markKeyAsFailed: 在row中未找到.key-enable-btn按钮');
+                }
+            } else {
+                console.error('markKeyAsFailed: 未找到key的父行(.api-provider-row)');
+            }
+        }
+        
+        // 显示具体的错误信息，而不是通用的失败消息
+        if (errorMessage) {
+            showToast(errorMessage);
+        }
+        
+    } catch (error) {
+        console.error('标记Key失败状态出错:', error);
+    }
+}
+
+async function toggleKeyEnable(button) {
+    try {
+        const currentStatus = button.dataset.status || 'disabled';
+        const row = button.closest('.api-provider-row');
+        const keyInput = row.querySelector('.api-key-input');
+        const keyValue = keyInput ? keyInput.value.trim() : '';
+        
+        if (!keyValue) {
+            showToast('请先填写API Key');
+            return;
+        }
+        
+        // 状态切换逻辑：disabled -> enabled -> disabled -> failed -> enabled
+        let newStatus, newIcon, newTitle, newColor;
+        
+        console.log(`[多key调试] toggleKeyEnable被调用: 当前状态=${currentStatus}, key前缀=${keyValue.substring(0, 10)}...`);
+        
+        switch (currentStatus) {
+            case 'disabled':
+                // 禁用 -> 启用
+                newStatus = 'enabled';
+                newIcon = '🟢';
+                newTitle = '已启用 (点击禁用)';
+                newColor = '#28a745';
+                
+                // 禁用所有其他key
+                await disableAllOtherKeys();
+                
+                // 启用这个key
+                button.dataset.enabled = 'true';
+                await updateGlobalApiKey(keyValue);
+                showToast('已启用此API Key');
+                break;
+                
+            case 'enabled':
+                // 启用 -> 禁用
+                newStatus = 'disabled';
+                newIcon = '⚪';
+                newTitle = '已禁用 (点击启用)';
+                newColor = '#6c757d';
+                button.dataset.enabled = 'false';
+                
+                // 回退到主key
+                await enableMainKey();
+                showToast('已禁用此API Key');
+                break;
+                
+            case 'failed':
+                // 失败 -> 启用
+                newStatus = 'enabled';
+                newIcon = '🟢';
+                newTitle = '已启用 (点击禁用)';
+                newColor = '#28a745';
+                
+                // 禁用所有其他key
+                await disableAllOtherKeys();
+                
+                // 启用这个key
+                button.dataset.enabled = 'true';
+                await updateGlobalApiKey(keyValue);
+                showToast('已重新启用此API Key');
+                break;
+        }
+        
+        // 更新按钮状态
+        button.dataset.status = newStatus;
+        button.innerHTML = newIcon;
+        button.title = newTitle;
+        button.style.backgroundColor = newColor;
+        
+        // 更新对应行的样式
+        if (newStatus === 'enabled') {
+            row.classList.add('enabled');
+        } else {
+            row.classList.remove('enabled');
+        }
+        
+        // 统一更新所有key的状态
+        setTimeout(() => {
+            updateAllKeyStates();
+        }, 100);
+        
+    } catch (error) {
+        console.error('切换Key状态失败:', error);
+        showToast('操作失败: ' + error.message);
+    }
+}
+
+async function toggleMainKeyStatus(button) {
+    try {
+        const currentStatus = button.dataset.status || 'enabled';
+        const keyInput = document.getElementById('apiKey');
+        const keyValue = keyInput ? keyInput.value.trim() : '';
+        
+        if (!keyValue) {
+            showToast('请先填写主API Key');
+            return;
+        }
+        
+        let newStatus, newIcon, newTitle, newColor;
+        
+        switch (currentStatus) {
+            case 'enabled':
+                // 启用 -> 禁用（用户点击只能禁用，不能直接标记为失败）
+                newStatus = 'disabled';
+                newIcon = '⚪';
+                newTitle = '主Key未启用 (点击启用)';
+                newColor = '#6c757d';
+                button.dataset.enabled = 'false';
+                showToast('已禁用主API Key');
+                break;
+                
+            case 'failed':
+                // 失败 -> 启用
+                newStatus = 'enabled';
+                newIcon = '🟢';
+                newTitle = '主Key已启用 (点击禁用)';
+                newColor = '#28a745';
+                
+                // 禁用所有副key
+                await disableAllOtherKeys();
+                
+                // 启用主key
+                button.dataset.enabled = 'true';
+                await updateGlobalApiKey(keyValue);
+                showToast('已重新启用主API Key');
+                break;
+                
+            case 'disabled':
+                // 禁用 -> 启用（当副key被启用时主key会变为禁用状态）
+                newStatus = 'enabled';
+                newIcon = '🟢';
+                newTitle = '主Key已启用 (点击禁用)';
+                newColor = '#28a745';
+                
+                // 禁用所有副key
+                await disableAllOtherKeys();
+                
+                // 启用主key
+                button.dataset.enabled = 'true';
+                await updateGlobalApiKey(keyValue);
+                showToast('已启用主API Key');
+                break;
+        }
+        
+        // 更新按钮状态
+        button.dataset.status = newStatus;
+        button.innerHTML = newIcon;
+        button.title = newTitle;
+        // 主key按钮不设置背景色，保持透明
+        
+        // 更新主key行的样式
+        const mainKeyRow = document.querySelector('.main-key-row');
+        if (mainKeyRow) {
+            if (newStatus === 'enabled') {
+                mainKeyRow.classList.add('enabled');
+            } else {
+                mainKeyRow.classList.remove('enabled');
+            }
+        }
+        
+        // 统一更新所有key的状态
+        setTimeout(() => {
+            updateAllKeyStates();
+        }, 100);
+        
+    } catch (error) {
+        console.error('切换主Key状态失败:', error);
+        showToast('操作失败: ' + error.message);
+    }
+}
+
+// 辅助函数：启用第一个可用的副key
+async function enableFirstAvailableSecondaryKey() {
+    const allSecondaryButtons = document.querySelectorAll('.key-enable-btn');
+    for (const btn of allSecondaryButtons) {
+        const row = btn.closest('.api-provider-row');
+        const keyInput = row.querySelector('.api-key-input');
+        const keyValue = keyInput ? keyInput.value.trim() : '';
+        
+        if (keyValue && btn.dataset.status !== 'failed') {
+            // 启用这个key
+            btn.dataset.status = 'enabled';
+            btn.dataset.enabled = 'true';
+            btn.innerHTML = '🟢';
+            btn.style.backgroundColor = '#28a745';
+            btn.title = '已启用 (点击禁用)';
+            
+            await updateGlobalApiKey(keyValue);
+            console.log('已自动启用副key:', keyValue.substring(0, 10) + '...');
+            return;
+        }
+    }
+    
+    // 如果没有可用的副key，提示用户
+    showToast('没有可用的备用Key');
+}
+
+// 辅助函数：禁用所有其他key
+async function disableAllOtherKeys() {
+    // 禁用所有副key
+    const allSecondaryButtons = document.querySelectorAll('.key-enable-btn');
+    allSecondaryButtons.forEach(btn => {
+        btn.dataset.enabled = 'false';
+        btn.dataset.status = btn.dataset.status === 'failed' ? 'failed' : 'disabled';
+        btn.innerHTML = btn.dataset.status === 'failed' ? '🔴' : '⚪';
+        btn.style.backgroundColor = btn.dataset.status === 'failed' ? 'white' : '#6c757d';
+        btn.title = btn.dataset.status === 'failed' ? '标记失败 (点击重新启用)' : '点击启用此Key';
+    });
+    
+    // 仅在副key被启用时，才将主key设为视觉上的禁用状态
+    const mainKeyStatus = document.querySelector('.main-key-status');
+    if (mainKeyStatus) {
+        mainKeyStatus.dataset.enabled = 'false';
+        mainKeyStatus.dataset.status = mainKeyStatus.dataset.status === 'failed' ? 'failed' : 'disabled';
+        mainKeyStatus.innerHTML = mainKeyStatus.dataset.status === 'failed' ? '🔴' : '⚪';
+        mainKeyStatus.style.backgroundColor = mainKeyStatus.dataset.status === 'failed' ? 'white' : '#6c757d';
+        mainKeyStatus.title = mainKeyStatus.dataset.status === 'failed' ? '主Key标记失败 (点击重新启用)' : '主Key (点击启用)';
+    }
+}
+
+// 辅助函数：启用主key
+async function enableMainKey() {
+    const mainKeyStatus = document.querySelector('.main-key-status');
+    const mainKeyInput = document.getElementById('apiKey');
+    const mainKeyRow = document.querySelector('.main-key-row');
+    
+    if (mainKeyStatus && mainKeyInput && mainKeyRow) {
+        const keyValue = mainKeyInput.value.trim();
+        if (keyValue) {
+            // 禁用所有副key
+            await disableAllSecondaryKeys();
+            
+            mainKeyStatus.dataset.enabled = 'true';
+            mainKeyStatus.dataset.status = 'enabled';
+            mainKeyStatus.innerHTML = '🟢';
+            mainKeyStatus.title = '主Key已启用 (点击设为失败)';
+            mainKeyRow.classList.add('enabled');
+            
+            await updateGlobalApiKey(keyValue);
+        }
+    }
+}
+
+// 新增：仅禁用副key的函数
+async function disableAllSecondaryKeys() {
+    const allSecondaryButtons = document.querySelectorAll('.key-enable-btn');
+    allSecondaryButtons.forEach(btn => {
+        btn.dataset.enabled = 'false';
+        btn.dataset.status = btn.dataset.status === 'failed' ? 'failed' : 'disabled';
+        btn.innerHTML = btn.dataset.status === 'failed' ? '🔴' : '⚪';
+        btn.style.backgroundColor = btn.dataset.status === 'failed' ? 'white' : '#6c757d';
+        btn.title = btn.dataset.status === 'failed' ? '标记失败 (点击重新启用)' : '点击启用此Key';
+    });
+}
+
+// 新增：统一更新所有key的视觉状态
+function updateAllKeyStates() {
+    // 检查哪个key当前是启用的
+    const mainKeyStatus = document.querySelector('.main-key-status');
+    const mainKeyRow = document.querySelector('.main-key-row');
+    const allSecondaryButtons = document.querySelectorAll('.key-enable-btn');
+    const allSecondaryRows = document.querySelectorAll('.api-provider-row');
+    
+    let hasEnabledSecondaryKey = false;
+    
+    // 首先重置所有副key行的样式
+    allSecondaryRows.forEach(row => {
+        row.classList.remove('enabled');
+    });
+    
+    // 检查是否有副key被启用，并设置对应行的样式
+    allSecondaryButtons.forEach(btn => {
+        const row = btn.closest('.api-provider-row');
+        if (btn.dataset.enabled === 'true' && btn.dataset.status === 'enabled') {
+            hasEnabledSecondaryKey = true;
+            if (row) {
+                row.classList.add('enabled');
+            }
+        }
+    });
+    
+    // 处理主key的状态和样式
+    if (mainKeyStatus && mainKeyRow) {
+        const mainKeyInput = document.getElementById('apiKey');
+        const keyValue = mainKeyInput ? mainKeyInput.value.trim() : '';
+        
+        // 如果没有副key被启用，且主key不是失败状态，则主key应该是启用的
+        if (!hasEnabledSecondaryKey && keyValue && mainKeyStatus.dataset.status !== 'failed') {
+            mainKeyStatus.dataset.enabled = 'true';
+            mainKeyStatus.dataset.status = 'enabled';
+            mainKeyStatus.innerHTML = '🟢';
+            mainKeyStatus.title = '主Key已启用 (点击设为失败)';
+            mainKeyRow.classList.add('enabled');
+        } else {
+            // 主key未启用，移除启用样式
+            mainKeyRow.classList.remove('enabled');
+        }
+    }
+}
+
+
+// 辅助函数：更新全局API Key
+async function updateGlobalApiKey(keyValue) {
+    if (keyValue && window.apiSettings) {
+        const oldKey = window.apiSettings.key;
+        window.apiSettings.key = keyValue;
+        console.log(`[多key调试] 已更新全局API Key: ${oldKey ? oldKey.substring(0, 8) + '...' : 'empty'} -> ${keyValue.substring(0, 8) + '...'}`);
+        
+        try {
+            if (window.apiConfigManager && window.apiConfigManager.activeConfigId) {
+                const config = await window.apiConfigManager.getConfigById(window.apiConfigManager.activeConfigId);
+                if (config && config.apiKeys) {
+                    const keyIndex = config.apiKeys.findIndex(k => k.key === keyValue);
+                    if (keyIndex !== -1) {
+                        await window.apiConfigManager.setKeyEnabled(window.apiConfigManager.activeConfigId, keyIndex, true);
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('更新配置管理器状态失败:', error);
+        }
+    }
+}
+
+async function updateConfigKeyInDB(newKey) {
+    try {
+        if (!window.apiConfigManager || !window.apiConfigManager.activeConfigId) {
+            console.error('无法更新配置：配置管理器未初始化或无激活配置');
+            return;
+        }
+        
+        // 获取当前激活的配置
+        const configId = window.apiConfigManager.activeConfigId;
+        const config = await window.apiConfigManager.getConfigById(configId);
+        
+        if (!config) {
+            console.error('无法获取当前配置');
+            return;
+        }
+        
+        // 更新配置中的主key字段
+        config.key = newKey;
+        config.updatedAt = Date.now();
+        
+        // 如果有apiKeys数组，也要更新对应key的启用状态
+        if (config.apiKeys && Array.isArray(config.apiKeys)) {
+            // 将所有key设为未启用
+            config.apiKeys.forEach(keyObj => {
+                keyObj.enabled = false;
+            });
+            
+            // 找到新启用的key并设为启用状态
+            const enabledKeyObj = config.apiKeys.find(keyObj => keyObj.key === newKey);
+            if (enabledKeyObj) {
+                enabledKeyObj.enabled = true;
+            }
+        }
+        
+        // 保存配置到IndexedDB
+        await window.apiConfigManager.saveConfig(config);
+        
+        console.log('已更新IndexedDB中的配置key:', newKey.substring(0, 8) + '...');
+        
+    } catch (error) {
+        console.error('更新IndexedDB配置失败:', error);
+        showToast('更新配置失败: ' + error.message);
+    }
+}
+
+function updateKeyStats(input) {
+    try {
+        let keyValue = input.value;
+        
+        // 确保keyValue是字符串
+        if (typeof keyValue === 'object') {
+            keyValue = keyValue.key || keyValue.toString();
+        }
+        
+        keyValue = keyValue ? keyValue.trim() : '';
+        
+        const row = input.closest('.api-provider-row');
+        const maskedDisplay = row.querySelector('.key-masked-compact');
+        const callsCount = row.querySelector('.calls-count');
+        const successRate = row.querySelector('.success-rate');
+        
+        if (!keyValue) {
+            if (maskedDisplay) maskedDisplay.textContent = '未设置';
+            if (callsCount) callsCount.textContent = '0次';
+            if (successRate) successRate.textContent = '0%';
+            return;
+        }
+        
+        // 显示掩码Key
+        if (window.apiConfigManager) {
+            if (maskedDisplay) {
+                maskedDisplay.textContent = window.apiConfigManager.maskKey(keyValue);
+            }
+            
+            // 获取统计信息
+            const configId = window.apiConfigManager.activeConfigId || 'unknown';
+            const keyIndex = Array.from(document.querySelectorAll('.api-provider-row')).indexOf(row) + 1;
+            const stats = window.apiConfigManager.getKeyStats(configId, keyIndex, keyValue);
+            
+            if (callsCount) callsCount.textContent = `${stats.recentCalls}次`;
+            if (successRate) successRate.textContent = `${stats.successRate}%`;
+        }
+        
+    } catch (error) {
+        console.error('更新Key统计失败:', error);
+    }
+}
+
+function updateMainKeyStats(input) {
+    try {
+        const keyValue = input.value.trim();
+        const maskedDisplay = document.getElementById('mainKeyMask');
+        const callsCount = document.getElementById('mainKeyCalls');
+        const successRate = document.getElementById('mainKeySuccess');
+        
+        if (!maskedDisplay || !callsCount || !successRate) return;
+        
+        if (!keyValue) {
+            maskedDisplay.textContent = '未设置';
+            callsCount.textContent = '0次';
+            successRate.textContent = '0%';
+            return;
+        }
+        
+        // 显示掩码Key
+        if (window.apiConfigManager) {
+            maskedDisplay.textContent = window.apiConfigManager.maskKey(keyValue);
+            
+            // 获取统计信息（主key的索引是0）
+            const configId = window.apiConfigManager.activeConfigId || 'unknown';
+            const stats = window.apiConfigManager.getKeyStats(configId, 0, keyValue);
+            
+            callsCount.textContent = `${stats.recentCalls}次`;
+            successRate.textContent = `${stats.successRate}%`;
+        }
+        
+    } catch (error) {
+        console.error('更新主Key统计失败:', error);
+    }
+}
+
+async function loadModelsForConfig(configSelectId, modelSelectId) {
+    try {
+        const configSelect = document.getElementById(configSelectId);
+        const modelSelect = document.getElementById(modelSelectId);
+        
+        if (!configSelect || !modelSelect) return;
+        
+        const configId = configSelect.value;
+        
+        // 清空模型选择器
+        modelSelect.innerHTML = '';
+        
+        if (!configId) {
+            modelSelect.innerHTML = '<option value="">请先选择API配置</option>';
+            return;
+        }
+        
+        if (configId === 'sync_with_primary') {
+            modelSelect.innerHTML = '<option value="sync_with_primary">与主模型保持一致</option>';
+            return;
+        }
+        
+        // 获取指定配置的模型列表
+        if (!window.apiConfigManager) {
+            modelSelect.innerHTML = '<option value="">配置管理器未初始化</option>';
+            return;
+        }
+        
+        const config = await window.apiConfigManager.getConfigById(configId);
+        if (!config) {
+            modelSelect.innerHTML = '<option value="">配置不存在</option>';
+            return;
+        }
+        
+        // 创建临时的API连接来获取模型列表
+        modelSelect.innerHTML = '<option value="">加载中...</option>';
+        
+        const tempApiService = {
+            baseURL: config.url,
+            apiKey: config.key,
+            timeout: config.timeout
+        };
+        
+        try {
+            const response = await fetch(`${config.url}/models`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${config.key}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: config.timeout * 1000
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            const data = await response.json();
+            const models = data.data || [];
+            
+            modelSelect.innerHTML = '';
+            
+            if (models.length === 0) {
+                modelSelect.innerHTML = '<option value="">无可用模型</option>';
+                return;
+            }
+            
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model.id;
+                option.textContent = model.id;
+                modelSelect.appendChild(option);
+            });
+            
+            // 保存配置选择
+            const type = configSelectId.includes('primary') ? 'primary' : 'secondary';
+            if (type === 'primary') {
+                localStorage.setItem('primaryModelConfig', configId);
+                console.log(`[模型配置] 已保存主要配置选择: ${configId}`);
+            } else {
+                localStorage.setItem('secondaryModelConfig', configId);
+                console.log(`[模型配置] 已保存次要配置选择: ${configId}`);
+            }
+            
+        } catch (error) {
+            console.error('获取模型列表失败:', error);
+            modelSelect.innerHTML = '<option value="">获取模型失败</option>';
+        }
+        
+    } catch (error) {
+        console.error('loadModelsForConfig 失败:', error);
+    }
+}
+
+/**
+ * 保存模型选择到localStorage
+ * @param {string} type - 'primary' 或 'secondary'
+ */
+function saveModelSelection(type) {
+    try {
+        const configSelectId = type === 'primary' ? 'primaryConfigSelect' : 'secondaryConfigSelect';
+        const modelSelectId = type === 'primary' ? 'primaryModelSelect' : 'secondaryModelSelect';
+        
+        const configSelect = document.getElementById(configSelectId);
+        const modelSelect = document.getElementById(modelSelectId);
+        
+        if (configSelect && modelSelect) {
+            const configId = configSelect.value;
+            const modelId = modelSelect.value;
+            
+            if (type === 'primary') {
+                localStorage.setItem('primaryModelConfig', configId);
+                localStorage.setItem('primaryModel', modelId);
+                console.log(`[模型选择] 已保存主要模型: 配置=${configId}, 模型=${modelId}`);
+            } else {
+                localStorage.setItem('secondaryModelConfig', configId);
+                localStorage.setItem('secondaryModel', modelId);
+                console.log(`[模型选择] 已保存次要模型: 配置=${configId}, 模型=${modelId}`);
+            }
+        }
+    } catch (error) {
+        console.error('保存模型选择失败:', error);
+    }
+}
+
+async function getApiConnectionForModel(modelType) {
+    try {
+        if (modelType === 'primary') {
+            const configId = localStorage.getItem('primaryModelConfig');
+            const modelId = localStorage.getItem('primaryModel');
+            
+            if (!configId || !modelId) {
+                throw new Error('主要模型配置未设置');
+            }
+            
+            const config = await window.apiConfigManager.getConfigById(configId);
+            if (!config) {
+                throw new Error('API配置不存在');
+            }
+            
+            return {
+                baseURL: config.url,
+                apiKey: config.key,
+                timeout: config.timeout,
+                model: modelId,
+                configId: configId
+            };
+            
+        } else if (modelType === 'secondary') {
+            const configId = localStorage.getItem('secondaryModelConfig');
+            const modelId = localStorage.getItem('secondaryModel');
+            
+            if (!configId || configId === 'sync_with_primary' || !modelId || modelId === 'sync_with_primary') {
+                // 使用主要模型的配置
+                return await getApiConnectionForModel('primary');
+            }
+            
+            const config = await window.apiConfigManager.getConfigById(configId);
+            if (!config) {
+                throw new Error('次要模型API配置不存在');
+            }
+            
+            return {
+                baseURL: config.url,
+                apiKey: config.key,
+                timeout: config.timeout,
+                model: modelId,
+                configId: configId
+            };
+        }
+        
+        throw new Error('未知的模型类型');
+        
+    } catch (error) {
+        console.error('获取API连接信息失败:', error);
+        throw error;
+    }
+}
+
+// API配置管理页面函数
+async function loadApiConfigManagementPage() {
+    try {
+        if (!window.apiConfigManager) return;
+        
+        const configs = await window.apiConfigManager.getAllConfigs();
+        const configList = document.getElementById('apiConfigList');
+        
+        if (!configList) return;
+        
+        if (configs.length === 0) {
+            configList.innerHTML = `
+                <div class="config-list-empty">
+                    <div class="empty-icon">⚙️</div>
+                    <div class="empty-text">暂无API配置</div>
+                    <button class="empty-action-btn" onclick="showNewApiConfigForm()">添加第一个配置</button>
+                </div>
+            `;
+        } else {
+            configList.innerHTML = configs.map(config => `
+                <div class="config-item" onclick="editApiConfigInPage('${config.id}')">
+                    <div class="config-item-header">
+                        <div class="config-item-name">${config.configName}</div>
+                        <div class="config-item-actions">
+                            <button class="config-item-btn config-item-edit" onclick="event.stopPropagation(); editApiConfigInPage('${config.id}')" title="编辑">✏️</button>
+                            <button class="config-item-btn config-item-delete" onclick="event.stopPropagation(); deleteApiConfigInPage('${config.id}')" title="删除">🗑️</button>
+                        </div>
+                    </div>
+                    <div class="config-item-url">${config.url}</div>
+                    <div class="config-item-status active">已配置</div>
+                </div>
+            `).join('');
+        }
+        
+    } catch (error) {
+        console.error('加载API配置列表失败:', error);
+    }
+}
+
+function showNewApiConfigForm() {
+    // 清空表单
+    document.getElementById('pageConfigName').value = '新配置 ' + Date.now().toString().slice(-6);
+    document.getElementById('pageApiUrl').value = '';
+    document.getElementById('pageApiKey').value = '';
+    document.getElementById('pageApiTimeout').value = '60';
+    
+    // 设置表单标题和状态
+    document.getElementById('configFormTitle').textContent = '新增API配置';
+    window.currentEditingConfigId = null;
+    
+    // 显示表单
+    document.getElementById('apiConfigForm').style.display = 'block';
+}
+
+function closeApiConfigForm() {
+    document.getElementById('apiConfigForm').style.display = 'none';
+    window.currentEditingConfigId = null;
+}
+
+async function editApiConfigInPage(configId) {
+    try {
+        const config = await window.apiConfigManager.getConfigById(configId);
+        if (!config) return;
+        
+        // 填充表单
+        document.getElementById('pageConfigName').value = config.configName || '';
+        document.getElementById('pageApiUrl').value = config.url || '';
+        document.getElementById('pageApiKey').value = config.key || '';
+        document.getElementById('pageApiTimeout').value = config.timeout || 60;
+        
+        // 设置表单标题和状态
+        document.getElementById('configFormTitle').textContent = '编辑API配置';
+        window.currentEditingConfigId = configId;
+        
+        // 显示表单
+        document.getElementById('apiConfigForm').style.display = 'block';
+        
+    } catch (error) {
+        console.error('加载配置失败:', error);
+        showToast('加载配置失败: ' + error.message);
+    }
+}
+
+async function deleteApiConfigInPage(configId) {
+    try {
+        if (!confirm('确定要删除这个API配置吗？')) return;
+        
+        await window.apiConfigManager.deleteConfig(configId);
+        showToast('配置删除成功');
+        
+        // 重新加载列表
+        await loadApiConfigManagementPage();
+        
+    } catch (error) {
+        console.error('删除配置失败:', error);
+        showToast('删除配置失败: ' + error.message);
+    }
+}
+
+async function saveApiConfigInPage(event) {
+    event.preventDefault();
+    
+    try {
+        const configData = {
+            configId: window.currentEditingConfigId,
+            configName: document.getElementById('pageConfigName').value.trim(),
+            url: document.getElementById('pageApiUrl').value.trim(),
+            key: document.getElementById('pageApiKey').value.trim(),
+            timeout: parseInt(document.getElementById('pageApiTimeout').value) || 60
+        };
+        
+        if (!configData.configName || !configData.url || !configData.key) {
+            showToast('请填写完整的配置信息');
+            return;
+        }
+        
+        await window.apiConfigManager.saveConfig(configData);
+        showToast(window.currentEditingConfigId ? '配置更新成功' : '配置保存成功');
+        
+        // 关闭表单并重新加载列表
+        closeApiConfigForm();
+        await loadApiConfigManagementPage();
+        
+        // 自动关闭API配置管理页面，返回到我的界面
+        setTimeout(() => {
+            showPage('profilePage');
+        }, 1000); // 延迟1秒让用户看到成功提示
+        
+    } catch (error) {
+        console.error('保存配置失败:', error);
+        showToast('保存配置失败: ' + error.message);
+    }
+}
+
+async function testApiConnectionInPage(event) {
+    try {
+        const url = document.getElementById('pageApiUrl').value.trim();
+        const key = document.getElementById('pageApiKey').value.trim();
+        const timeout = parseInt(document.getElementById('pageApiTimeout').value) || 60;
+        
+        if (!url || !key) {
+            showToast('请先填写API URL和API Key');
+            return;
+        }
+        
+        const button = event.target;
+        button.disabled = true;
+        button.textContent = '测试中...';
+        
+        const response = await fetch(`${url}/models`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${key}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: timeout * 1000
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            showToast(`连接成功！找到 ${data.data?.length || 0} 个模型`);
+        } else {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+    } catch (error) {
+        console.error('测试连接失败:', error);
+        showToast('连接测试失败: ' + error.message);
+    } finally {
+        const button = event.target;
+        button.disabled = false;
+        button.textContent = '测试连接';
+    }
 }
 
 async function setBackground(event) {
@@ -5884,148 +7516,120 @@ async function setBackground(event) {
     showToast('背景设置成功');
 }
 
-// =================================================================
-// 辅助函数：将 File 对象转换为 Base64 字符串
-// 我们可以把它放在 addEmoji 函数前面，方便调用
-// =================================================================
-function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => resolve(reader.result); // reader.result 已经是 'data:image/png;base64,...' 格式
-        reader.onerror = error => reject(error);
-    });
-}
-
-
-// =================================================================
-// 【核心修改】将 addEmoji 函数替换为下面的异步版本
-// =================================================================
 async function addEmoji(event) {
     event.preventDefault();
     const meaning = document.getElementById('emojiMeaning').value.trim();
-    const urlValue = document.getElementById('emojiUrl').value.trim();
-
-    if (!meaning) {
-        showToast('必须填写表情含义');
-        return;
-    }
-    if (emojis.some(e => e.meaning === meaning)) {
-        showToast('该表情含义已存在，请使用其他名称。');
+    if (emojis.some(e => e.tag === meaning)) {
+        showToast('该表情标签已存在，请使用其他标签。');
         return;
     }
     
-    let newEmoji;
-    const emojiId = Date.now().toString();
-
-    try {
-        if (selectedEmojiFile) {
-            // 【修改】优先处理上传的文件，并将其转换为Base64
-            showToast('正在转换图片...');
-            const base64Url = await fileToBase64(selectedEmojiFile); // <-- 使用新函数
+    const imageUrl = document.getElementById('emojiUrl').value;
+    
+    // 处理临时URL的情况：如果是临时URL但还有临时文件，先转换存储
+    if (imageUrl.startsWith('temp:') && window.ImageUploadHandlers.tempEmojiFile) {
+        try {
+            const statusElement = document.getElementById('emojiUploadStatus');
+            await window.ImageUploadHandlers.storeEmojiWithMeaning(window.ImageUploadHandlers.tempEmojiFile, meaning, statusElement);
             
-            newEmoji = { 
-                id: emojiId,
-                meaning: meaning,
-                type: 'base64', // <-- 类型改为 'base64'
-                url: base64Url    // <-- 存储Base64字符串
-            };
-            showToast('正在添加图片表情...');
-
-        } else if (urlValue) {
-            // 如果没有上传文件，但有URL，则按旧方式处理
-            newEmoji = {
-                id: emojiId,
-                url: urlValue, 
-                meaning: meaning,
-                type: 'url' // 保持为 'url' 类型
-            };
-            showToast('正在添加链接表情...');
-        } else {
-            showToast('请上传表情图片或粘贴图片URL');
+            // 清理临时数据
+            const tempUrl = imageUrl.substring(5);
+            URL.revokeObjectURL(tempUrl);
+            window.ImageUploadHandlers.tempEmojiFile = null;
+            
+            // 获取新的fileId URL
+            const newImageUrl = document.getElementById('emojiUrl').value;
+            
+            if (!newImageUrl.startsWith('file:')) {
+                showToast('文件存储失败，请重试');
+                return;
+            }
+        } catch (error) {
+            console.error('临时文件转换失败:', error);
+            showToast('文件存储失败，请重试');
             return;
         }
-
-        emojis.push(newEmoji);
-        await saveDataToDB(); // 调用保存函数
-        
-        renderEmojiGrid(); // 重新渲染表情面板
-        closeModal('addEmojiModal');
-        
-        // 清理工作
-        event.target.reset();
-        selectedEmojiFile = null;
-        document.getElementById('emojiUploadStatus').textContent = '';
-
-        showToast('表情添加成功');
-
-    } catch (error) {
-        console.error('添加表情失败:', error);
-        showToast('图片转换或添加失败: ' + error.message);
     }
+    
+    const finalImageUrl = document.getElementById('emojiUrl').value;
+    
+    // 处理不同格式的图片
+    let imageData = finalImageUrl;
+    if (finalImageUrl.startsWith('file:')) {
+        // 新的fileSystem格式 - 表情包已经在上传时保存到文件系统
+        // 只需要保存emoji记录即可，不需要额外处理
+        imageData = finalImageUrl; // 保留file:fileId格式用于引用
+    } else if (finalImageUrl.startsWith('data:image/')) {
+        // 传统的base64格式（向后兼容，但新版本应该不会用到）
+        await saveEmojiImage(meaning, finalImageUrl);
+        imageData = `[emoji:${meaning}]`; // 内部存储格式
+    } else if (finalImageUrl.startsWith('temp:')) {
+        showToast('文件尚未正确存储，请重新上传');
+        return;
+    } else {
+        showToast('无效的图片格式，请重新上传');
+        return;
+    }
+    
+    const emoji = { 
+        id: Date.now().toString(), 
+        tag: meaning,  // 使用tag而不是meaning
+        meaning: meaning, // 保留meaning用于显示
+        // 新增：如果是fileId格式，保存fileId字段
+        ...(finalImageUrl.startsWith('file:') ? { fileId: finalImageUrl.substring(5) } : {})
+    };
+    emojis.push(emoji);
+    await saveDataToDB(); // 使用IndexedDB保存
+    renderEmojiGrid();
+    closeModal('addEmojiModal');
+    showToast('表情添加成功');
+    event.target.reset();
 }
 
 async function deleteEmoji(emojiId) {
     showConfirmDialog('删除确认', '确定要删除这个表情吗？', async () => {
         const emojiToDelete = emojis.find(e => e.id === emojiId);
-        if (!emojiToDelete) return;
-
-        // 从内存数组中移除
-        emojis = emojis.filter(e => e.id !== emojiId);
-
-        // 从 IndexedDB 中删除
-        if (isIndexedDBReady) {
-            const transaction = db.transaction(['emojis', 'emojiBlobs'], 'readwrite');
-            const emojisStore = transaction.objectStore('emojis');
-            await promisifyRequest(emojisStore.delete(emojiId));
-
-            // 如果是 blob 类型，也要从 emojiBlobs 表中删除
-            if (emojiToDelete.type === 'blob') {
-                const emojiBlobsStore = transaction.objectStore('emojiBlobs');
-                await promisifyRequest(emojiBlobsStore.delete(emojiId));
-            }
-            await promisifyTransaction(transaction);
+        if (emojiToDelete && emojiToDelete.tag) {
+            // 删除对应的图片数据
+            await deleteEmojiImage(emojiToDelete.tag);
         }
-        
+        emojis = emojis.filter(e => e.id !== emojiId);
+        await saveDataToDB(); // 使用IndexedDB保存
         renderEmojiGrid();
         showToast('表情已删除');
     });
 }
 
-// 将函数声明为 async，因为我们需要等待 getEmojiSrc
 async function renderEmojiGrid() {
     const grid = document.getElementById('emojiGrid');
     grid.innerHTML = '';
     
-    // 使用 Promise.all 来并行获取所有表情的 URL
-    const emojiItemsHtml = await Promise.all(emojis.map(async (emoji) => {
-        try {
-            const src = await getEmojiSrc(emoji);
-            // 注意这里 onclick 传递的是完整的 emoji 对象
-            const itemHtml = `
-                <div class="emoji-item" data-emoji-id="${emoji.id}">
-                    <img src="${src}">
-                    <div class="emoji-delete-btn" onclick="event.stopPropagation(); deleteEmoji('${emoji.id}')">×</div>
-                </div>
-            `;
-            return itemHtml;
-        } catch (error) {
-            console.error(`渲染表情 ${emoji.meaning} 失败:`, error);
-            return ''; // 出错时返回空字符串
+    for (const emoji of emojis) {
+        const item = document.createElement('div');
+        item.className = 'emoji-item';
+        
+        // 获取表情图片
+        let imageSrc;
+        if (emoji.tag) {
+            // 新格式：从emojiImages存储获取
+            imageSrc = await getEmojiImage(emoji.tag);
+        } else if (emoji.url) {
+            // 旧格式：直接使用URL
+            imageSrc = emoji.url;
         }
-    }));
-
-    grid.innerHTML = emojiItemsHtml.join('');
+        
+        if (imageSrc) {
+            item.innerHTML = `<img src="${imageSrc}"><div class="emoji-delete-btn" onclick="event.stopPropagation(); deleteEmoji('${emoji.id}')">×</div>`;
+            item.onclick = () => sendEmoji(emoji);
+        } else {
+            // 如果没有图片数据，显示占位符
+            item.innerHTML = `<div style="background: #f0f0f0; display: flex; align-items: center; justify-content: center; width: 80px; height: 80px; border-radius: 8px;">${emoji.meaning || emoji.tag || '?'}</div><div class="emoji-delete-btn" onclick="event.stopPropagation(); deleteEmoji('${emoji.id}')">×</div>`;
+            item.onclick = () => sendEmoji(emoji);
+        }
+        
+        grid.appendChild(item);
+    }
     
-    // 为每个 emoji-item 单独绑定事件，确保传递正确的对象
-    grid.querySelectorAll('.emoji-item').forEach(item => {
-        const emojiId = item.dataset.emojiId;
-        const emojiObject = emojis.find(e => e.id === emojiId);
-        if (emojiObject) {
-            item.onclick = () => sendEmoji(emojiObject);
-        }
-    });
-
     const addBtn = document.createElement('div');
     addBtn.className = 'add-emoji-btn';
     addBtn.textContent = '+ 添加表情';
@@ -6036,128 +7640,70 @@ async function renderEmojiGrid() {
 async function sendRedPacket(event) {
     event.preventDefault();
     if (!currentContact) return;
-
-    const amountInput = document.getElementById('redPacketAmount');
-    const messageInput = document.getElementById('redPacketMessage');
-    
-    const amount = parseFloat(amountInput.value);
-    const message = messageInput.value || '恭喜发财，大吉大利！';
-
-    // 1. 检查金额是否有效
-    if (isNaN(amount) || amount <= 0) {
-        showToast('红包金额必须大于0');
-        return;
-    }
-
-    // 2. 核心：检查钱包余额
-    if (amount > userProfile.wallet.balance) {
-        showToast('钱包余额不足，无法发送红包');
-        return; // 余额不足，终止操作
-    }
-
-    // 3. 扣款并创建支出记录
-    userProfile.wallet.balance -= amount;
-    const transaction = {
-        id: Date.now(),
-        type: 'expense', // 交易类型：支出
-        amount: amount,
-        description: `给 ${currentContact.name} 发送了红包`,
-        timestamp: new Date().toISOString()
-    };
-    userProfile.wallet.transactions.unshift(transaction); // 将记录添加到最前面
-
-    // 4. 创建红包消息并发送（这部分和原来一样）
-    const packetData = { amount: amount.toFixed(2), message };
+    const amount = document.getElementById('redPacketAmount').value;
+    const message = document.getElementById('redPacketMessage').value || '恭喜发财，大吉大利！';
+    if (amount <= 0) { showToast('红包金额必须大于0'); return; }
+    const packetData = { amount: parseFloat(amount).toFixed(2), message };
     const packetMessage = { role: 'user', content: JSON.stringify(packetData), type: 'red_packet', time: new Date().toISOString(), senderId: 'user' };
-    
     currentContact.messages.push(packetMessage);
     if (currentContact.messages.length > currentlyDisplayedMessageCount) {
         currentlyDisplayedMessageCount++;
     }
     currentContact.lastMessage = '[红包]';
-    currentContact.lastTime = packetMessage.time;
-    
-    renderMessages(true);
-    renderContactList();
-    
-    // 5. 保存所有更改到数据库
-    await saveDataToDB();
-    
+    currentContact.lastTime = formatContactListTime(new Date().toISOString());
+    // 使用addSingleMessage添加消息到界面，避免重新渲染整个聊天
+    await addSingleMessage(packetMessage, true);
+    await renderContactList();
+    await saveDataToDB(); // 使用IndexedDB保存
     closeModal('redPacketModal');
-    
-    // 清空输入框以便下次使用
-    amountInput.value = '';
-    messageInput.value = '';
-    
-    await sendMessage(); // 触发AI回复
+    await sendMessage();
 }
 
 async function sendEmoji(emoji) {
     if (!currentContact) return;
-
-    // 【核心修改】消息内容现在存储的是表情的"含义"，而不是URL
-    currentContact.messages.push({ 
-        role: 'user', 
-        content: emoji.meaning, // 使用含义
-        type: 'emoji', 
-        time: new Date().toISOString(), 
-        senderId: 'user' 
-    });
-
+    // 使用新的[emoji:tag]格式存储
+    const content = emoji.tag ? `[emoji:${emoji.tag}]` : emoji.url;
+    const emojiMessage = { role: 'user', content: content, type: 'emoji', time: new Date().toISOString(), senderId: 'user' };
+    currentContact.messages.push(emojiMessage);
     if (currentContact.messages.length > currentlyDisplayedMessageCount) {
         currentlyDisplayedMessageCount++;
     }
-    currentContact.lastMessage = `[表情] ${emoji.meaning}`;
-    // 获取刚刚发送的表情消息的时间戳
-    const userEmojiMessageTime = currentContact.messages[currentContact.messages.length - 1].time;
-    currentContact.lastTime = userEmojiMessageTime;
-    
-    renderMessages(true);
-    renderContactList();
-    await updateContactInDB(currentContact);
+    currentContact.lastMessage = '[表情]';
+    currentContact.lastTime = formatContactListTime(new Date().toISOString());
+    // 使用addSingleMessage添加消息到界面，避免重新渲染整个聊天
+    await addSingleMessage(emojiMessage, true);
+    await renderContactList();
+    await saveDataToDB(); // 使用IndexedDB保存
     toggleEmojiPanel(true);
-
-    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
-        showToast('请先设置API');
-        return;
-    }
-
-    // 新增：判断当前聊天类型
-    if (currentContact.type === 'group') {
-        // 如果是群聊，调用群聊消息处理函数
-        await sendGroupMessage();
-    } else {
-        // 如果是私聊，执行原来的逻辑
-        showTypingIndicator();
-        try {
-            const { replies, newMemoryTable } = await callAPI(currentContact);
-            hideTypingIndicator();
-            if (newMemoryTable) {
-                window.memoryTableManager.updateContactMemoryTable(currentContact, newMemoryTable);
-                await updateContactInDB(currentContact);
-            }
-            if (!replies || replies.length === 0) {
-                showTopNotification('AI没有返回有效回复');
-                return;
-            }
-            for (const response of replies) {
-                await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 800));
-                const aiMessage = { role: 'assistant', content: response.content, type: response.type, time: new Date().toISOString(), senderId: currentContact.id };
-                currentContact.messages.push(aiMessage);
-                if (currentContact.messages.length > currentlyDisplayedMessageCount) {
-                    currentlyDisplayedMessageCount++;
-                }
-                currentContact.lastMessage = response.type === 'text' ? response.content.substring(0, 20) + '...' : '[表情]';
-                currentContact.lastTime = aiMessage.time;
-                renderMessages(true);
-                renderContactList();
-                await updateContactInDB(currentContact);
-            }
-        } catch (error) {
-            hideTypingIndicator();
-            console.error('AI回复错误:', error);
-            showToast('AI回复失败');
+    if (!apiSettings.url || !apiSettings.key || !apiSettings.model) { showToast('请先设置API'); return; }
+    showTypingIndicator();
+    try {
+        const { replies } = await callAPI(currentContact);
+        hideTypingIndicator();
+        
+        // 异步更新记忆表格（使用API队列，不阻塞用户操作）
+        if (window.updateMemoryTableWithSecondaryModel) {
+            window.updateMemoryTableWithSecondaryModel(currentContact, true);
         }
+        if (!replies || replies.length === 0) { showTopNotification('AI没有返回有效回复'); return; }
+        for (const response of replies) {
+            await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 800));
+            const aiMessage = { role: 'assistant', content: removeThinkingChain(response.content), type: response.type, time: new Date().toISOString(), senderId: currentContact.id };
+            currentContact.messages.push(aiMessage);
+            if (currentContact.messages.length > currentlyDisplayedMessageCount) {
+                currentlyDisplayedMessageCount++;
+            }
+            currentContact.lastMessage = response.type === 'text' ? response.content.substring(0, 20) + '...' : '[表情]';
+            currentContact.lastTime = formatContactListTime(new Date().toISOString());
+            // 使用addSingleMessage添加AI回复消息，避免重新渲染整个聊天
+            await addSingleMessage(aiMessage, true);
+            await renderContactList();
+            await saveDataToDB();
+        }
+    } catch (error) {
+        hideTypingIndicator();
+        console.error('AI回复错误:', error);
+        showApiError(error);
     }
 }
 
@@ -6191,10 +7737,17 @@ async function clearMessages() {
         currentContact.messages = [];
         currentlyDisplayedMessageCount = 0; // 重置计数
         currentContact.lastMessage = '暂无消息';
-        currentContact.lastTime = new Date().toISOString();
-        renderMessages(true); // 重新渲染
-        renderContactList();
-        await updateContactInDB(currentContact);
+        currentContact.lastTime = formatContactListTime(new Date().toISOString());
+        renderMessages(false); // 重新渲染，但不滚动到底部
+        await renderContactList();
+        await saveDataToDB();
+        
+        // 清空该角色的记忆数据
+        if (window.clearCharacterMemory) {
+            await window.clearCharacterMemory(currentContact.id);
+            console.log(`[清空聊天] 已清空角色 ${currentContact.id} 的记忆数据`);
+        }
+        
         showToast('已清空聊天记录');
         toggleSettingsMenu(true);
     });
@@ -6210,6 +7763,9 @@ async function deleteMessage(messageIndex) {
         return;
     }
     
+    // 保存被删除的消息，用于记忆更新
+    const deletedMessage = currentContact.messages[messageIndex];
+    
     currentContact.messages.splice(messageIndex, 1);
 
     // 如果删除的是已显示的消息，则更新计数
@@ -6221,15 +7777,25 @@ async function deleteMessage(messageIndex) {
     if (currentContact.messages.length > 0) {
         const lastMsg = currentContact.messages[currentContact.messages.length - 1];
         currentContact.lastMessage = lastMsg.type === 'text' ? lastMsg.content.substring(0, 20) + '...' : (lastMsg.type === 'emoji' ? '[表情]' : '[红包]');
-        currentContact.lastTime = lastMsg.time;
+        currentContact.lastTime = formatContactListTime(lastMsg.time);
     } else {
         currentContact.lastMessage = '暂无消息';
-        currentContact.lastTime = new Date().toISOString();
+        currentContact.lastTime = formatContactListTime(new Date().toISOString());
     }
 
     renderMessages(false); // 重新渲染，但不滚动到底部
-    renderContactList();
-    await updateContactInDB(currentContact);
+    await renderContactList();
+    await saveDataToDB();
+    
+    // 检查并更新记忆
+    if (window.checkAndUpdateMemoryAfterDeletion && deletedMessage) {
+        try {
+            await window.checkAndUpdateMemoryAfterDeletion(currentContact.id, [deletedMessage], currentContact);
+        } catch (error) {
+            console.error('删除消息后更新记忆失败:', error);
+        }
+    }
+    
     showToast('消息已删除');
 }
 
@@ -6255,7 +7821,7 @@ async function deleteCurrentContact() {
  * @param {string} contactId 要删除的联系人/群聊的ID
  */
 async function deleteContact(contactId) {
-    if (!isIndexedDBReady) {
+    if (!window.isIndexedDBReady) {
         showToast('数据库未准备好，无法删除。');
         return;
     }
@@ -6271,17 +7837,25 @@ async function deleteContact(contactId) {
     }
 
     try {
-        const transaction = db.transaction(['contacts'], 'readwrite');
+        const transaction = window.db.transaction(['contacts'], 'readwrite');
         const store = transaction.objectStore('contacts');
         await promisifyRequest(store.delete(contactId)); // 从IndexedDB删除
 
         // 如果删除的是当前正在聊天的对象，需要重置currentContact
         if (currentContact && currentContact.id === contactId) {
             currentContact = null;
+    window.currentContact = null;
         }
 
-        renderContactList(); // 重新渲染联系人列表
+        await renderContactList(); // 重新渲染联系人列表
         await saveDataToDB(); // 重新保存contacts数组到IndexedDB，确保数据同步
+        
+        // 清空该角色的记忆数据
+        if (window.clearCharacterMemory) {
+            await window.clearCharacterMemory(contactId);
+            console.log(`[删除联系人] 已清空角色 ${contactId} 的记忆数据`);
+        }
+        
         showToast('聊天对象已删除');
     } catch (error) {
         console.error('删除联系人/群聊失败:', error);
@@ -6295,48 +7869,33 @@ async function deleteContact(contactId) {
  * @param {string} message 对话框消息
  * @param {function} onConfirm 用户点击确认按钮时执行的回调
  */
-function showConfirmDialog(title, message, onConfirm) {
-    const dialogId = 'customConfirmDialog';
-    let dialog = document.getElementById(dialogId);
-    if (!dialog) {
-        dialog = document.createElement('div');
-        dialog.id = dialogId;
-        dialog.className = 'modal'; // 复用modal的样式
-        dialog.innerHTML = `
-            <div class="modal-content">
-                <div class="modal-header">
-                    <div class="modal-title" id="confirmDialogTitle"></div>
-                    <div class="modal-close" onclick="closeModal('${dialogId}')">取消</div>
-                </div>
-                <div class="modal-body">
-                    <p id="confirmDialogMessage" style="text-align: center; margin-bottom: 20px;"></p>
-                    <div style="display: flex; justify-content: space-around; gap: 10px;">
-                        <button class="form-submit" style="background-color: #ccc; flex: 1;" onclick="closeModal('${dialogId}')">取消</button>
-                        <button class="form-submit delete-button" style="flex: 1;" id="confirmActionButton">确定</button>
-                    </div>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(dialog);
-    }
-
-    document.getElementById('confirmDialogTitle').textContent = title;
-    document.getElementById('confirmDialogMessage').textContent = message;
-    
-    const confirmBtn = document.getElementById('confirmActionButton');
-    confirmBtn.onclick = () => {
-        onConfirm();
-        closeModal(dialogId);
-    };
-
-    showModal(dialogId);
-}
+// showConfirmDialog function moved to utils/uiUtils.js
 
 /**
  * 显示消息操作菜单（编辑/删除）
  * @param {number} messageIndex 消息索引
  * @param {HTMLElement} messageElement 消息DOM元素
  */
+/**
+ * 为消息元素添加长按和右键菜单事件监听器
+ * @param {HTMLElement} msgDiv - 消息元素
+ * @param {number} originalIndex - 消息在数组中的原始索引
+ */
+function addMessageActionListeners(msgDiv, originalIndex) {
+    let msgPressTimer;
+    msgDiv.addEventListener('touchstart', () => { 
+        msgPressTimer = setTimeout(() => { 
+            showMessageActionMenu(originalIndex, msgDiv); 
+        }, 700); 
+    });
+    msgDiv.addEventListener('touchend', () => clearTimeout(msgPressTimer));
+    msgDiv.addEventListener('touchmove', () => clearTimeout(msgPressTimer));
+    msgDiv.addEventListener('contextmenu', (e) => { 
+        e.preventDefault(); 
+        showMessageActionMenu(originalIndex, msgDiv); 
+    });
+}
+
 function showMessageActionMenu(messageIndex, messageElement) {
     const menuId = 'messageActionMenu';
     let menu = document.getElementById(menuId);
@@ -6461,177 +8020,21 @@ async function saveEditedMessage(messageIndex, newContent) {
     
     // 更新消息内容
     currentContact.messages[messageIndex].content = newContent;
-    // currentContact.messages[messageIndex].edited = true; // 已注释掉，不再标记为已编辑
+    currentContact.messages[messageIndex].edited = true;
     currentContact.messages[messageIndex].editTime = new Date().toISOString();
     
     // 重新渲染消息
     renderMessages(false);
     
     // 保存到数据库
-    await updateContactInDB(currentContact);
+    await saveDataToDB();
     
     showToast('消息已更新');
 }
 
-function formatContactListTime(dateString) {
-    const d = new Date(dateString);
-    if (isNaN(d.getTime())) return '';
-    
-    const now = new Date();
-    const diff = now - d;
-    
-    if (diff < 3600000) {
-         const minutes = Math.floor(diff / 60000);
-         return minutes < 1 ? '刚刚' : `${minutes}分钟前`;
-    }
+// formatContactListTime function moved to utils/formatUtils.js
 
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const messageDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-
-    if (today.getTime() === messageDate.getTime()) {
-         const hours = d.getHours().toString().padStart(2, '0');
-         const minutes = d.getMinutes().toString().padStart(2, '0');
-         return `${hours}:${minutes}`;
-    }
-    return `${d.getMonth() + 1}月${d.getDate()}日`;
-}
-
-/**
- * @description 显示钱包页面并渲染数据
- */
-function showWalletPage() {
-    // 切换到钱包页面
-    showPage('walletPage');
-
-    const balanceEl = document.getElementById('walletBalance');
-    const transactionListEl = document.getElementById('transactionList');
-
-    // 1. 更新余额显示，并格式化为两位小数
-    balanceEl.textContent = `¥ ${userProfile.wallet.balance.toFixed(2)}`;
-
-    // 2. 渲染交易记录列表
-    transactionListEl.innerHTML = ''; // 先清空列表
-
-    if (!userProfile.wallet.transactions || userProfile.wallet.transactions.length === 0) {
-        transactionListEl.innerHTML = '<div class="transaction-empty">还没有任何交易记录</div>';
-    } else {
-        // 按照时间倒序排序交易记录
-        const sortedTransactions = [...userProfile.wallet.transactions].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
-        sortedTransactions.forEach(tx => {
-            const item = document.createElement('div');
-            item.className = 'transaction-item';
-
-            const isIncome = tx.type === 'income';
-            const amountClass = isIncome ? 'income' : 'expense'; // 根据类型设置不同样式
-            const amountSign = isIncome ? '+' : '-';             // 根据类型设置不同符号
-            const amountColorStyle = isIncome ? 'color: #28a745;' : 'color: #dc3545;'; // 直接内联颜色
-
-            item.innerHTML = `
-                <div class="transaction-details">
-                    <div class="transaction-description">${tx.description}</div>
-                    <div class="transaction-time">${formatChatTimestamp(tx.timestamp)}</div>
-                </div>
-                <div class="transaction-amount ${amountClass}" style="${amountColorStyle}">
-                    ${amountSign}${tx.amount.toFixed(2)}
-                </div>
-            `;
-            transactionListEl.appendChild(item);
-        });
-    }
-}
-
-/**
- * @description 用户点击领取红包
- * @param {number} messageIndex 红包消息在消息数组中的索引
- */
-async function openRedPacket(messageIndex) {
-    if (!currentContact || messageIndex >= currentContact.messages.length) {
-        return;
-    }
-
-    const message = currentContact.messages[messageIndex];
-
-    // ================== 新增代码开始 ==================
-    // 检查红包发送者，如果是自己（'user'），则提示并中断函数
-    if (message.senderId === 'user' || message.role === 'user') {
-        showToast('您不能领取自己发送的红包');
-        return;
-    }
-    // ================== 新增代码结束 ==================
-
-    // 检查红包是否已被领取
-    if (message.opened) {
-        showToast('这个红包已经被领过啦');
-        return;
-    }
-
-    try {
-        const packet = JSON.parse(message.content);
-        const amount = parseFloat(packet.amount);
-
-        // 1. 更新钱包余额
-        userProfile.wallet.balance += amount;
-
-        // 2. 创建一条交易记录
-        const transaction = {
-            id: Date.now(),
-            type: 'income', // 收入
-            amount: amount,
-            from: currentContact.name, // 红包来源
-            description: `领取了 ${currentContact.name} 的红包`,
-            timestamp: new Date().toISOString()
-        };
-        userProfile.wallet.transactions.unshift(transaction); // 加到记录数组的开头
-
-        // 3. 标记红包为已打开
-        message.opened = true;
-
-        // 4. 保存所有更改到数据库
-        await updateContactInDB(currentContact); // 只更新当前联系人（红包状态）
-        await saveDataToDB(); // 同时需要保存用户钱包的变化
-
-        // 5. 给用户反馈
-        showToast(`领取成功！+${amount.toFixed(2)}元`);
-
-    } catch (error) {
-        console.error('打开红包失败:', error);
-        showToast('打开红包失败，数据格式可能已损坏。');
-    }
-}
-
-function formatChatTimestamp(dateString) {
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) return '';
-
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const yesterday = new Date(today.getTime() - 86400000);
-    
-    const messageDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-
-    const beijingTime = new Date(date.getTime());
-    const hours = beijingTime.getHours().toString().padStart(2, '0');
-    const minutes = beijingTime.getMinutes().toString().padStart(2, '0');
-    const timeStr = `${hours}:${minutes}`;
-
-    if (messageDate.getTime() === today.getTime()) {
-        return timeStr;
-    }
-    if (messageDate.getTime() === yesterday.getTime()) {
-        return `昨天 ${timeStr}`;
-    }
-    if (now.getFullYear() === date.getFullYear()) {
-        const month = (date.getMonth() + 1);
-        const day = date.getDate();
-        return `${month}月${day}日 ${timeStr}`;
-    } else {
-        const year = date.getFullYear();
-        const month = (date.getMonth() + 1);
-        const day = date.getDate();
-        return `${year}年${month}月${day}日 ${timeStr}`;
-    }
-}
+// formatChatTimestamp function moved to utils/formatUtils.js
 
 // --- 事件监听 ---
 document.getElementById('chatInput').addEventListener('keypress', async (e) => { // Make it async
@@ -6650,8 +8053,81 @@ document.addEventListener('click', (e) => {
     }
 });
 
-// 监听DOMContentLoaded事件，这是执行所有JS代码的入口
-document.addEventListener('DOMContentLoaded', init);
+// --- 1. 修改你的 DOMContentLoaded 事件监听器 ---
+// 找到文件末尾的这个事件监听器，用下面的代码替换它
+
+document.addEventListener('DOMContentLoaded', async () => {
+    // 立即设置主应用初始化标志，通知扩展模块
+    window.mainAppInitializing = true;
+    window.mainAppInitStartTime = Date.now();
+    
+    // 显示初始化提示
+    showInitializationProgress('正在启动应用...', 'system');
+    
+    try {
+        // 验证和初始化APIService
+        console.log('=== 页面初始化开始 ===');
+        showInitializationProgress('正在检查API服务...', 'api');
+        console.log('APIService状态:', !!window.apiService);
+        
+        if (!window.apiService && typeof APIService !== 'undefined') {
+            console.log('重新初始化APIService...');
+            window.apiService = new APIService();
+            console.log('APIService重新初始化完成');
+        }
+        
+        console.log('最终APIService状态:', !!window.apiService);
+        console.log('========================');
+        
+        // 注册Service Worker
+        showInitializationProgress('正在注册Service Worker...', 'worker');
+        if (window.SystemUtils && typeof window.SystemUtils.registerServiceWorker === 'function') {
+            window.SystemUtils.registerServiceWorker();
+        }
+              
+        // 检查URL中是否有导入ID
+        showInitializationProgress('正在检查URL参数...', 'url');
+        const urlParams = new URLSearchParams(window.location.search);
+        const importId = urlParams.get('importId');
+
+        if (importId) {
+            // 如果有ID，则执行自动导入流程
+            showInitializationProgress('正在执行自动导入...', 'import');
+            await handleAutoImport(importId);
+        } else {
+            // 否则，正常初始化应用
+            showInitializationProgress('正在初始化数据库...', 'database');
+            await init();
+        }
+        
+        // 初始化完成
+        const initTime = Date.now() - window.mainAppInitStartTime;
+        console.log(`[主应用] 初始化完成，耗时: ${initTime}ms`);
+        
+        // 发送初始化完成事件
+        if (typeof window.dispatchEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('mainAppInitComplete', {
+                detail: { 
+                    initTime: initTime,
+                    timestamp: Date.now()
+                }
+            }));
+        }
+        
+        // 隐藏初始化提示
+        hideInitializationProgress();
+        
+    } catch (error) {
+        console.error('[主应用] 初始化失败:', error);
+        showInitializationProgress('应用启动失败: ' + error.message, 'error');
+        setTimeout(() => hideInitializationProgress(), 5000);
+    } finally {
+        window.mainAppInitializing = false;
+        
+        // 启动联系人时间定时更新器
+        startContactTimeUpdater();
+    }
+});
 
 // 全局错误处理器
 window.addEventListener('error', (event) => {
@@ -6663,7 +8139,6 @@ window.addEventListener('error', (event) => {
         error: event.error ? {
             name: event.error.name,
             message: event.error.message,
-            stack: event.error.stack
         } : null,
         timestamp: new Date().toISOString(),
         userAgent: navigator.userAgent,
@@ -6671,16 +8146,18 @@ window.addEventListener('error', (event) => {
     });
 });
 
-// 处理Promise rejections
-window.addEventListener('unhandledrejection', (event) => {
-    console.error('未处理的Promise拒绝:', {
-        reason: event.reason,
-        promise: event.promise,
-        timestamp: new Date().toISOString(),
-        userAgent: navigator.userAgent,
-        url: window.location.href
-    });
-});
+// 处理Promise rejections（重复的监听器，应该统一处理）
+// window.addEventListener('unhandledrejection', (event) => {
+//     console.error('未处理的Promise拒绝:', {
+//         reason: event.reason,
+//         promise: event.promise,
+//         timestamp: new Date().toISOString(),
+//         userAgent: navigator.userAgent,
+//         url: window.location.href
+//     });
+//     event.preventDefault(); // 阻止默认浏览器提示框
+// });
+// 注释掉重复的监听器，使用第一个已经有preventDefault的监听器
 
 // --- 新增：帖子选择和手动发帖功能 ---
 
@@ -6705,6 +8182,8 @@ function showManualPostModal() {
     document.getElementById('manualPostContent').value = '';
     document.getElementById('manualPostImageDesc').value = '';
     
+    // manualPostUnsplashKey元素已从HTML中移除，不再恢复Unsplash API Key
+    
     showModal('manualPostModal');
 }
 
@@ -6715,6 +8194,8 @@ async function handleManualPost(event) {
     const relationTag = document.getElementById('manualPostTag').value.trim();
     const postContent = document.getElementById('manualPostContent').value.trim();
     const imageDescription = document.getElementById('manualPostImageDesc').value.trim();
+    // manualPostUnsplashKey元素已从HTML中移除，从localStorage直接获取
+    const unsplashKey = localStorage.getItem('forumUnsplashApiKey') || '';
     
     if (!postContent) {
         showToast('请填写帖子内容');
@@ -6726,13 +8207,15 @@ async function handleManualPost(event) {
         return;
     }
     
+    // Unsplash API Key已从localStorage获取，无需重复保存
+    
     closeModal('manualPostModal');
     
     // 生成手动帖子
-    await generateManualPost(authorName, relationTag, postContent, imageDescription);
+    await generateManualPost(authorName, relationTag, postContent, imageDescription, unsplashKey);
 }
 
-async function generateManualPost(authorName, relationTag, postContent, imageDescription) {
+async function generateManualPost(authorName, relationTag, postContent, imageDescription, unsplashKey = null) {
     const now = Date.now();
     const postCreatedAt = new Date(now - (Math.random() * 3 + 2) * 60 * 1000);
     
@@ -6747,6 +8230,23 @@ async function generateManualPost(authorName, relationTag, postContent, imageDes
             timestamp: postCreatedAt.toISOString()
         }]
     };
+    
+    // 为手动帖子生成图片
+    if (unsplashKey && imageDescription && imageDescription.trim()) {
+        try {
+            const imageUrl = await fetchMatchingImageForPublish(imageDescription, unsplashKey);
+            if (imageUrl) {
+                // 将图片描述替换为实际图片HTML
+                weiboData.posts[0].actual_image_url = imageUrl;
+                // 保留原始描述用于备份
+                weiboData.posts[0].original_image_description = imageDescription;
+                weiboData.posts[0].image_description = `<img src="${imageUrl}" alt="${imageDescription}" style="width: 100%; max-width: 300px; border-radius: 8px;">`;
+            }
+        } catch (imageError) {
+            console.warn(`为手动帖子生成图片失败: ${imageError.message}`);
+            // 图片生成失败时保持原始文字描述
+        }
+    }
     
     const newPost = {
         id: Date.now(),
@@ -6764,6 +8264,12 @@ async function generateManualPost(authorName, relationTag, postContent, imageDes
     renderAllWeiboPosts();
     showToast('帖子发布成功！');
 
+    // 检查并更新全局记忆（用户发帖内容）
+    if (window.characterMemoryManager) {
+        const forumContent = `用户发帖：\n标题：${relationTag}\n内容：${postContent}${imageDescription ? '\n图片描述：' + imageDescription : ''}`;
+        window.characterMemoryManager.checkAndUpdateGlobalMemory(forumContent);
+    }
+
     // 如果没有配置API，就只显示帖子，不生成评论
     if (!apiSettings.url || !apiSettings.key || !apiSettings.model) {
         showToast('未配置API，仅发布帖子，无评论生成');
@@ -6780,7 +8286,7 @@ async function generateManualPost(authorName, relationTag, postContent, imageDes
     
     try {
         // 调用新的手动帖子提示词构建方法
-        const systemPrompt = window.promptBuilder.buildManualPostPrompt(
+        const systemPrompt = await window.promptBuilder.buildManualPostPrompt(
             authorName,
             relationTag,
             postContent,
@@ -6790,34 +8296,49 @@ async function generateManualPost(authorName, relationTag, postContent, imageDes
             emojis
         );
         
-        const data = await window.apiService.callOpenAIAPI(
-            apiSettings.url,
-            apiSettings.key,
-            apiSettings.model,
-            [{ role: 'user', content: systemPrompt }],
-            { 
-                response_format: { type: "json_object" },
-                temperature: 0.8 
-            },
-            (apiSettings.timeout || 60) * 1000
-        );
+        const payload = {
+            model: apiSettings.model,
+            messages: [{ role: 'user', content: systemPrompt }],
+            response_format: { type: "json_object" },
+            temperature: 0.8
+        };
 
-        let jsonText = data.choices[0].message.content;
+        const apiUrl = `${apiSettings.url}/chat/completions`;
+
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiSettings.key}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('ERROR: 朋友圈图片生成API失败 - 完整返回:', errorText);
+            throw new Error(`API请求失败: ${response.status} - ${errorText}`);
+        }
+
+        const data = await response.json();
+        let rawText = data.choices[0].message.content;
         
-        if (!jsonText) {
+        if (!rawText) {
+            console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(data, null, 2));
             throw new Error("AI未返回有效内容");
         }
         
-        // 自动清理AI可能返回的多余代码块
-        jsonText = jsonText.trim();
-        if (jsonText.startsWith('```json')) {
-            jsonText = jsonText.substring(7).trim();
-        }
-        if (jsonText.endsWith('```')) {
-            jsonText = jsonText.slice(0, -3).trim();
+        // 使用统一的JSON提取函数清理markdown语法
+        let cleanedJson;
+        try {
+            cleanedJson = window.apiService.extractJSON(rawText);
+        } catch (extractError) {
+            console.error('ERROR: JSON提取失败 - API完整返回:', rawText);
+            console.error('ERROR: JSON提取失败 - 错误详情:', extractError);
+            throw new Error(`JSON提取失败: ${extractError.message}`);
         }
 
-        const commentsData = JSON.parse(jsonText);
+        const commentsData = JSON.parse(cleanedJson);
         
         let lastCommentTime = postCreatedAt.getTime();
         
@@ -6849,7 +8370,7 @@ async function generateManualPost(authorName, relationTag, postContent, imageDes
 
     } catch (error) {
         console.error('生成评论失败:', error);
-        showToast('生成评论失败: ' + error.message);
+        showApiError(error);
     } finally {
         loadingIndicator.remove();
     }
@@ -6976,6 +8497,14 @@ function deleteSelectedMessages() {
             // 将选中的索引转换为数组并排序（从大到小，避免删除时索引变化）
             const sortedIndexes = Array.from(selectedMessages).sort((a, b) => b - a);
             
+            // 保存被删除的消息，用于记忆更新
+            const deletedMessages = [];
+            for (const messageIndex of sortedIndexes) {
+                if (messageIndex < currentContact.messages.length) {
+                    deletedMessages.push(currentContact.messages[messageIndex]);
+                }
+            }
+            
             // 逐个删除消息
             for (const messageIndex of sortedIndexes) {
                 if (messageIndex < currentContact.messages.length) {
@@ -6988,10 +8517,10 @@ function deleteSelectedMessages() {
                 const lastMsg = currentContact.messages[currentContact.messages.length - 1];
                 currentContact.lastMessage = lastMsg.type === 'text' ? lastMsg.content.substring(0, 20) + '...' : 
                                            (lastMsg.type === 'emoji' ? '[表情]' : '[红包]');
-                currentContact.lastTime = lastMsg.time;
+                currentContact.lastTime = formatContactListTime(lastMsg.time);
             } else {
                 currentContact.lastMessage = '暂无消息';
-                currentContact.lastTime = new Date().toISOString();
+                currentContact.lastTime = formatContactListTime(new Date().toISOString());
             }
             
             // 更新当前显示的消息数量
@@ -7003,8 +8532,17 @@ function deleteSelectedMessages() {
             exitMultiSelectMode();
             
             // 重新渲染
-            renderContactList();
-            await updateContactInDB(currentContact);
+            await renderContactList();
+            await saveDataToDB();
+            
+            // 检查并更新记忆
+            if (window.checkAndUpdateMemoryAfterDeletion && deletedMessages.length > 0) {
+                try {
+                    await window.checkAndUpdateMemoryAfterDeletion(currentContact.id, deletedMessages, currentContact);
+                } catch (error) {
+                    console.error('批量删除消息后更新记忆失败:', error);
+                }
+            }
             
             showToast(`已成功删除 ${selectedCount} 条消息`);
             
@@ -7015,16 +8553,1004 @@ function deleteSelectedMessages() {
     });
 }
 
+// === 记忆管理系统 ===
+class MemoryManager {
+    constructor() {
+        // 不再使用localStorage存储，直接使用indexedDB
+        this.currentMemoryType = 'global';
+        this.currentCharacter = null;
+        this.selectedMemoryId = null;
+    }
 
+    // 获取全局记忆（从indexedDB读取）
+    async getGlobalMemories() {
+        if (!window.characterMemoryManager) {
+            return [];
+        }
+        
+        const globalMemory = await window.characterMemoryManager.getGlobalMemory();
+        if (!globalMemory || !globalMemory.trim()) {
+            return [];
+        }
+        
+        // 将全局记忆转换为记忆数组格式
+        const memoryItems = this.parseMemoryItems(globalMemory);
+        return [{
+            id: 'global-memory',
+            content: globalMemory,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            items: memoryItems
+        }];
+    }
+
+    // 获取角色记忆（从indexedDB读取）
+    async getCharacterMemories(characterId) {
+        if (!window.characterMemoryManager) {
+            return [];
+        }
+        
+        const characterMemory = await window.characterMemoryManager.getCharacterMemory(characterId);
+        if (!characterMemory || !characterMemory.trim()) {
+            return [];
+        }
+        
+        // 将角色记忆转换为记忆数组格式
+        const memoryItems = this.parseMemoryItems(characterMemory);
+        return [{
+            id: `character-memory-${characterId}`,
+            content: characterMemory,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            items: memoryItems
+        }];
+    }
+
+    // 添加全局记忆（直接保存到indexedDB）
+    async addGlobalMemory(content) {
+        // 清理内容，只保留有效的markdown列表项
+        const cleanedContent = this.cleanAndValidateMemoryContent(content);
+        
+        if (!cleanedContent) {
+            throw new Error('无效的记忆格式！请使用 "- 记忆内容" 的格式');
+        }
+        
+        if (!window.characterMemoryManager) {
+            throw new Error('记忆管理系统未初始化');
+        }
+        
+        // 获取现有全局记忆
+        const existingMemory = await window.characterMemoryManager.getGlobalMemory();
+        let combinedMemory;
+        
+        if (existingMemory && existingMemory.trim()) {
+            combinedMemory = existingMemory + '\n' + cleanedContent;
+        } else {
+            combinedMemory = cleanedContent;
+        }
+        
+        // 直接保存到indexedDB
+        const success = await window.characterMemoryManager.saveGlobalMemory(combinedMemory);
+        
+        if (!success) {
+            throw new Error('保存全局记忆失败');
+        }
+        
+        const memory = {
+            id: Date.now().toString(),
+            content: cleanedContent,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        
+        return memory;
+    }
+
+    // 添加角色记忆（直接保存到indexedDB）
+    async addCharacterMemory(characterId, content) {
+        // 清理内容，只保留有效的markdown列表项
+        const cleanedContent = this.cleanAndValidateMemoryContent(content);
+        
+        if (!cleanedContent) {
+            throw new Error('无效的记忆格式！请使用 "- 记忆内容" 的格式');
+        }
+        
+        if (!window.characterMemoryManager) {
+            throw new Error('记忆管理系统未初始化');
+        }
+        
+        // 获取现有角色记忆
+        const existingMemory = await window.characterMemoryManager.getCharacterMemory(characterId);
+        let combinedMemory;
+        
+        if (existingMemory && existingMemory.trim()) {
+            combinedMemory = existingMemory + '\n' + cleanedContent;
+        } else {
+            combinedMemory = cleanedContent;
+        }
+        
+        // 直接保存到indexedDB
+        const success = await window.characterMemoryManager.saveCharacterMemory(characterId, combinedMemory);
+        
+        if (!success) {
+            throw new Error('保存角色记忆失败');
+        }
+        
+        const memory = {
+            id: Date.now().toString(),
+            content: cleanedContent,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        
+        return memory;
+    }
+
+    // 更新记忆（直接更新indexedDB）
+    async updateMemory(memoryId, content, isCharacter = false, characterId = null) {
+        // 清理内容，只保留有效的markdown列表项
+        const cleanedContent = this.cleanAndValidateMemoryContent(content);
+        
+        if (!cleanedContent) {
+            throw new Error('无效的记忆格式！请使用 "- 记忆内容" 的格式');
+        }
+        
+        if (!window.characterMemoryManager) {
+            throw new Error('记忆管理系统未初始化');
+        }
+        
+        let success = false;
+        
+        if (isCharacter && characterId) {
+            // 直接替换角色记忆内容
+            success = await window.characterMemoryManager.saveCharacterMemory(characterId, cleanedContent);
+        } else {
+            // 直接替换全局记忆内容
+            success = await window.characterMemoryManager.saveGlobalMemory(cleanedContent);
+        }
+        
+        if (!success) {
+            throw new Error('更新记忆失败');
+        }
+        
+        const memory = {
+            id: memoryId,
+            content: cleanedContent,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        
+        return memory;
+    }
+
+    // 删除记忆（直接从 indexedDB 删除）
+    async deleteMemory(memoryId, isCharacter = false, characterId = null) {
+        if (!window.characterMemoryManager) {
+            throw new Error('记忆管理系统未初始化');
+        }
+        
+        let success = false;
+        
+        if (isCharacter && characterId) {
+            // 清空角色记忆
+            success = await window.characterMemoryManager.saveCharacterMemory(characterId, '');
+        } else {
+            // 清空全局记忆
+            success = await window.characterMemoryManager.saveGlobalMemory('');
+        }
+        
+        return success;
+    }
+
+    // 注意：这些同步方法已被上面的异步方法替代
+    // 如果代码中有同步调用，会出现错误，需要改为异步调用
+
+    // 清理和验证记忆内容，只保留有效的markdown列表项
+    cleanAndValidateMemoryContent(content) {
+        if (!content || typeof content !== 'string') {
+            return '';
+        }
+        
+        const lines = content.split('\n');
+        const validLines = [];
+        
+        lines.forEach(line => {
+            const trimmedLine = line.trim();
+            // 只保留以 "- " 开头的行
+            if (trimmedLine.startsWith('- ') && trimmedLine.length > 2) {
+                validLines.push(trimmedLine);
+            }
+        });
+        
+        return validLines.join('\n');
+    }
+    
+    // 将记忆内容分解为单独的记忆项列表
+    parseMemoryItems(content) {
+        const cleanContent = this.cleanAndValidateMemoryContent(content);
+        if (!cleanContent) return [];
+        
+        return cleanContent.split('\n').map(line => {
+            // 移除前面的 "- " 得到纯内容
+            return line.replace(/^- /, '').trim();
+        }).filter(item => item.length > 0);
+    }
+    
+    // 从记忆项列表重建markdown内容
+    buildMemoryContent(items) {
+        if (!Array.isArray(items) || items.length === 0) {
+            return '';
+        }
+        
+        return items.map(item => `- ${item.trim()}`).join('\n');
+    }
+    
+    // 解析Markdown到HTML（仅支持列表）
+    parseMarkdown(content) {
+        const cleanContent = this.cleanAndValidateMemoryContent(content);
+        if (!cleanContent) return '';
+        
+        const lines = cleanContent.split('\n');
+        const listItems = lines.map(line => {
+            const item = line.replace(/^- /, '');
+            return `<li>${this.escapeHtml(item)}</li>`;
+        }).join('');
+        
+        return listItems ? `<ul>${listItems}</ul>` : '';
+    }
+    
+    // HTML转义
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+}
+
+// 初始化记忆管理器
+const memoryManager = new MemoryManager();
+
+// 显示添加记忆模态框
+async function showAddMemoryModal() {
+    const modal = document.getElementById('addMemoryModal');
+    const memoryType = document.getElementById('memoryType');
+    const characterSelectGroup = document.getElementById('characterSelectGroup');
+    const memoryCharacterSelect = document.getElementById('memoryCharacterSelect');
+    
+    // 默认设置为全局记忆类型
+    memoryType.value = 'global';
+    
+    // 如果数据还没准备好，等待一下
+    if (!window.contacts || !Array.isArray(window.contacts) || window.contacts.length === 0) {
+        console.log('数据未准备好，等待加载...');
+        await waitForDataReady();
+    }
+    
+    // 填充角色选择器
+    memoryCharacterSelect.innerHTML = '<option value="">选择角色...</option>';
+    
+    // 确保contacts数组存在
+    if (window.contacts && Array.isArray(window.contacts)) {
+        let aiCount = 0;
+        
+        window.contacts.forEach(contact => {
+            console.log(`检查联系人: ${contact.name}, 类型: ${contact.type}`);
+            if (contact.type === 'private') {
+                const option = document.createElement('option');
+                option.value = contact.id;
+                option.textContent = contact.name;
+                memoryCharacterSelect.appendChild(option);
+                aiCount++;
+            }
+        });
+        
+        if (aiCount === 0) {
+            console.warn('没有找到任何AI角色，可能数据有问题');
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = '暂无可用角色';
+            option.disabled = true;
+            memoryCharacterSelect.appendChild(option);
+        }
+    } else {
+        console.warn('contacts数组不可用，无法填充角色选择器');
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = '数据加载中...';
+        option.disabled = true;
+        memoryCharacterSelect.appendChild(option);
+    }
+    
+    // 初始化时确保隐藏角色选择（因为默认是全局记忆）
+    characterSelectGroup.classList.add('hidden');
+    
+    showModal('addMemoryModal');
+}
+
+// 处理记忆类型改变
+function handleMemoryTypeChange() {
+    const memoryType = document.getElementById('memoryType').value;
+    const characterSelectGroup = document.getElementById('characterSelectGroup');
+    
+    if (memoryType === 'character') {
+        characterSelectGroup.classList.remove('hidden');
+    } else {
+        characterSelectGroup.classList.add('hidden');
+    }
+}
+
+// 处理添加记忆
+async function handleAddMemory(event) {
+    event.preventDefault();
+    
+    const memoryType = document.getElementById('memoryType').value;
+    let memoryContent = document.getElementById('memoryContent').value.trim();
+    const memoryCharacterSelect = document.getElementById('memoryCharacterSelect').value;
+    
+    // 自动为每行添加 - 前缀
+    if (memoryContent) {
+        const lines = memoryContent.split('\n');
+        const formattedLines = lines.map(line => {
+            const trimmedLine = line.trim();
+            if (trimmedLine && !trimmedLine.startsWith('- ')) {
+                return '- ' + trimmedLine;
+            }
+            return trimmedLine;
+        }).filter(line => line.length > 0);
+        memoryContent = formattedLines.join('\n');
+    }
+    
+    if (!memoryContent) {
+        showToast('请输入记忆内容');
+        return;
+    }
+    
+    if (memoryType === 'character' && !memoryCharacterSelect) {
+        console.error('角色记忆但未选择角色:', { memoryType, memoryCharacterSelect });
+        showToast('请选择角色');
+        return;
+    }
+    
+    // 验证选择的角色是否存在（角色记忆模式）
+    if (memoryType === 'character') {
+        const selectedContact = window.contacts && window.contacts.find(c => c.id === memoryCharacterSelect);
+        if (!selectedContact) {
+            console.error('选择的角色不存在:', memoryCharacterSelect);
+            showToast('选择的角色不存在，请重新选择');
+            return;
+        }
+    }
+    
+    try {
+        if (memoryType === 'global') {
+            await memoryManager.addGlobalMemory(memoryContent);
+            showToast('全局记忆添加成功');
+            if (memoryManager.currentMemoryType === 'global') {
+                loadGlobalMemories();
+            }
+        } else {
+            await memoryManager.addCharacterMemory(memoryCharacterSelect, memoryContent);
+            showToast('角色记忆添加成功');
+            if (memoryManager.currentMemoryType === 'character' && memoryManager.currentCharacter === memoryCharacterSelect) {
+                loadCharacterMemories();
+            }
+        }
+        
+        closeModal('addMemoryModal');
+        document.getElementById('memoryContent').value = '';
+    } catch (error) {
+        console.error('添加记忆失败:', error);
+        showToast('添加记忆失败');
+    }
+}
+
+// 切换记忆标签
+function switchMemoryTab(type) {
+    const globalTab = document.querySelector('.memory-tab:first-child');
+    const characterTab = document.querySelector('.memory-tab:last-child');
+    const globalSection = document.getElementById('globalMemorySection');
+    const characterSection = document.getElementById('characterMemorySection');
+    
+    // 更新标签样式
+    globalTab.classList.toggle('active', type === 'global');
+    characterTab.classList.toggle('active', type === 'character');
+    
+    // 显示对应内容
+    globalSection.classList.toggle('hidden', type !== 'global');
+    characterSection.classList.toggle('hidden', type !== 'character');
+    
+    memoryManager.currentMemoryType = type;
+    
+    if (type === 'global') {
+        loadGlobalMemories();
+    } else {
+        // 切换到角色记忆时重新加载角色选择器
+        loadCharacterSelector();
+        
+        // 如果角色选择器为空，说明数据可能还没加载完成
+        const characterSelector = document.getElementById('characterSelector');
+        if (characterSelector && characterSelector.options.length <= 1) {
+            waitForDataReady().then(() => {
+                loadCharacterSelector();
+            });
+        }
+    }
+}
+
+// 加载全局记忆
+async function loadGlobalMemories() {
+    const memoryList = document.getElementById('globalMemoryList');
+    if (!memoryList) return;
+    
+    try {
+        const memories = await memoryManager.getGlobalMemories();
+        
+        if (memories.length === 0) {
+            memoryList.innerHTML = '<div class="memory-empty">暂无全局记忆</div>';
+            return;
+        }
+        
+        memoryList.innerHTML = memories.map(memory => createMemoryItem(memory, false)).join('');
+    } catch (error) {
+        console.error('加载全局记忆失败:', error);
+        memoryList.innerHTML = '<div class="memory-empty">加载失败</div>';
+    }
+}
+
+// 加载角色选择器
+function loadCharacterSelector() {
+    const characterSelector = document.getElementById('characterSelector');
+    if (!characterSelector) {
+        console.error('角色选择器元素未找到');
+        return;
+    }
+    
+    characterSelector.innerHTML = '<option value="">选择角色...</option>';
+    
+    // 确保contacts数组存在
+    if (!window.contacts || !Array.isArray(window.contacts)) {
+        console.warn('contacts数组不可用，无法加载角色');
+        return;
+    }
+        
+    let aiContactCount = 0;
+    let totalContactCount = 0;
+    window.contacts.forEach(contact => {
+        totalContactCount++;
+        if (contact.type === 'private') {
+            const option = document.createElement('option');
+            option.value = contact.id;
+            option.textContent = contact.name;
+            characterSelector.appendChild(option);
+            aiContactCount++;
+        }
+    });
+    
+    
+    // 如果没有加载到任何角色，强制刷新一次
+    if (aiContactCount === 0 && totalContactCount > 0) {
+        setTimeout(() => {
+            loadCharacterSelector();
+        }, 1000);
+    }
+}
+
+// 加载角色记忆
+async function loadCharacterMemories() {
+    const characterSelector = document.getElementById('characterSelector');
+    const memoryList = document.getElementById('characterMemoryList');
+    
+    if (!characterSelector || !memoryList) {
+        return;
+    }
+    
+    const characterId = characterSelector.value;
+    
+    if (!characterId) {
+        memoryList.innerHTML = '<div class="memory-empty">请先选择角色</div>';
+        return;
+    }
+    
+    // 验证选择的角色是否存在
+    const selectedContact = window.contacts && window.contacts.find(c => c.id === characterId);
+    if (!selectedContact) {
+        memoryList.innerHTML = '<div class="memory-empty">选择的角色不存在，请重新选择</div>';
+        return;
+    }
+    
+    try {
+        memoryManager.currentCharacter = characterId;
+        const memories = await memoryManager.getCharacterMemories(characterId);
+        
+        if (memories.length === 0) {
+            memoryList.innerHTML = '<div class="memory-empty">该角色暂无记忆</div>';
+            return;
+        }
+        
+        memoryList.innerHTML = memories.map(memory => createMemoryItem(memory, true, characterId)).join('');
+    } catch (error) {
+        console.error('加载角色记忆失败:', error);
+        memoryList.innerHTML = '<div class="memory-empty">加载失败</div>';
+    }
+}
+
+// 创建记忆项HTML - 改为单条模式
+function createMemoryItem(memory, isCharacter, characterId = null) {
+    const date = new Date(memory.createdAt).toLocaleDateString();
+    const memoryItems = memoryManager.parseMemoryItems(memory.content);
+    
+    // 为每个记忆项创建单独的卡片
+    return memoryItems.map((item, index) => {
+        const itemId = `${memory.id}-${index}`;
+        
+        return `
+            <div class="memory-item single-item" data-id="${itemId}" data-memory-id="${memory.id}" data-item-index="${index}">
+                <div class="memory-single-content">
+                    <div class="memory-text">${memoryManager.escapeHtml(item)}</div>
+                    <div class="memory-meta">
+                        <span class="memory-date">${date}</span>
+                        <div class="memory-actions">
+                            <button class="memory-edit-btn" onclick="editSingleMemoryItem('${memory.id}', ${index}, ${isCharacter}, '${characterId || ''}')">修改</button>
+                            <button class="memory-edit-btn delete" onclick="deleteSingleMemoryItem('${memory.id}', ${index}, ${isCharacter}, '${characterId || ''}')">删除</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// 编辑单个记忆项
+async function editSingleMemoryItem(memoryId, itemIndex, isCharacter, characterId) {
+    let memory;
+    if (isCharacter && characterId) {
+        const memories = await memoryManager.getCharacterMemories(characterId);
+        if (!Array.isArray(memories)) {
+            showToast('获取记忆数据失败');
+            return;
+        }
+        memory = memories.find(m => m.id === memoryId);
+    } else {
+        const memories = await memoryManager.getGlobalMemories();
+        if (!Array.isArray(memories)) {
+            showToast('获取记忆数据失败');
+            return;
+        }
+        memory = memories.find(m => m.id === memoryId);
+    }
+    
+    if (!memory) {
+        showToast('记忆未找到');
+        return;
+    }
+    
+    const memoryItems = memoryManager.parseMemoryItems(memory.content);
+    if (itemIndex >= memoryItems.length) {
+        showToast('记忆项未找到');
+        return;
+    }
+    
+    const currentItem = memoryItems[itemIndex];
+    
+    // 设置编辑上下文信息
+    memoryManager.singleMemoryEditContext = {
+        memoryId,
+        itemIndex,
+        isCharacter,
+        characterId,
+        memoryItems
+    };
+    
+    // 使用自定义模态窗口进行编辑
+    const editSingleContentTextarea = document.getElementById('editSingleMemoryContent');
+    editSingleContentTextarea.value = currentItem;
+    
+    showModal('editSingleMemoryModal');
+}
+
+// 删除单个记忆项
+async function deleteSingleMemoryItem(memoryId, itemIndex, isCharacter, characterId) {
+    if (!confirm('确定要删除这条记忆吗？')) {
+        return;
+    }
+    
+    let memory;
+    if (isCharacter && characterId) {
+        const memories = await memoryManager.getCharacterMemories(characterId);
+        if (!Array.isArray(memories)) {
+            showToast('获取记忆数据失败');
+            return;
+        }
+        memory = memories.find(m => m.id === memoryId);
+    } else {
+        const memories = await memoryManager.getGlobalMemories();
+        if (!Array.isArray(memories)) {
+            showToast('获取记忆数据失败');
+            return;
+        }
+        memory = memories.find(m => m.id === memoryId);
+    }
+    
+    if (!memory) {
+        showToast('记忆未找到');
+        return;
+    }
+    
+    const memoryItems = memoryManager.parseMemoryItems(memory.content);
+    if (itemIndex >= memoryItems.length) {
+        showToast('记忆项未找到');
+        return;
+    }
+    
+    // 删除指定项
+    memoryItems.splice(itemIndex, 1);
+    
+    if (memoryItems.length === 0) {
+        // 如果没有记忆项了，删除整个记忆
+        await memoryManager.deleteMemory(memoryId, isCharacter, characterId);
+    } else {
+        // 更新记忆内容
+        const updatedContent = memoryManager.buildMemoryContent(memoryItems);
+        await updateSingleMemory(memoryId, updatedContent, isCharacter, characterId);
+    }
+    
+    // 刷新显示
+    if (isCharacter) {
+        loadCharacterMemories();
+    } else {
+        loadGlobalMemories();
+    }
+    
+    showToast('记忆删除成功');
+}
+
+// 更新单个记忆的辅助函数
+async function updateSingleMemory(memoryId, content, isCharacter, characterId) {
+    try {
+        const updated = await memoryManager.updateMemory(memoryId, content, isCharacter, characterId);
+        if (updated) {
+            // 刷新显示
+            if (isCharacter) {
+                loadCharacterMemories();
+            } else {
+                loadGlobalMemories();
+            }
+            showToast('记忆更新成功');
+        } else {
+            showToast('记忆更新失败');
+        }
+    } catch (error) {
+        console.error('更新记忆失败:', error);
+        showToast('记忆更新失败: ' + error.message);
+    }
+}
+
+// 编辑记忆
+async function editMemory(memoryId, isCharacter, characterId) {
+    memoryManager.selectedMemoryId = memoryId;
+    
+    let memory;
+    if (isCharacter && characterId) {
+        const memories = await memoryManager.getCharacterMemories(characterId);
+        if (!Array.isArray(memories)) {
+            showToast('获取记忆数据失败');
+            return;
+        }
+        memory = memories.find(m => m.id === memoryId);
+    } else {
+        const memories = await memoryManager.getGlobalMemories();
+        if (!Array.isArray(memories)) {
+            showToast('获取记忆数据失败');
+            return;
+        }
+        memory = memories.find(m => m.id === memoryId);
+    }
+    
+    if (!memory) {
+        showToast('记忆未找到');
+        return;
+    }
+    
+    const editContentTextarea = document.getElementById('editMemoryContent');
+    editContentTextarea.value = memory.content;
+    
+    // 存储编辑上下文
+    memoryManager.editingContext = {
+        isCharacter,
+        characterId
+    };
+    
+    showModal('editMemoryModal');
+}
+
+// 处理编辑记忆
+async function handleEditMemory(event) {
+    event.preventDefault();
+    
+    const newContent = document.getElementById('editMemoryContent').value.trim();
+    const memoryId = memoryManager.selectedMemoryId;
+    const context = memoryManager.editingContext || {};
+    
+    if (!newContent) {
+        showToast('请输入记忆内容');
+        return;
+    }
+    
+    if (!memoryId) {
+        showToast('记忆ID丢失');
+        return;
+    }
+    
+    try {
+        const updated = await memoryManager.updateMemory(memoryId, newContent, context.isCharacter, context.characterId);
+        if (updated) {
+            showToast('记忆更新成功');
+            closeModal('editMemoryModal');
+            
+            // 刷新显示
+            if (context.isCharacter) {
+                loadCharacterMemories();
+            } else {
+                loadGlobalMemories();
+            }
+        } else {
+            showToast('记忆更新失败');
+        }
+    } catch (error) {
+        console.error('更新记忆失败:', error);
+        showToast('记忆更新失败');
+    }
+}
+
+// 处理编辑单个记忆项
+async function handleEditSingleMemory(event) {
+    event.preventDefault();
+    
+    const newContent = document.getElementById('editSingleMemoryContent').value.trim();
+    const context = memoryManager.singleMemoryEditContext;
+    
+    if (!newContent) {
+        showToast('请输入记忆内容');
+        return;
+    }
+    
+    if (!context) {
+        showToast('编辑上下文丢失');
+        return;
+    }
+    
+    try {
+        // 更新记忆项
+        context.memoryItems[context.itemIndex] = newContent;
+        const updatedContent = memoryManager.buildMemoryContent(context.memoryItems);
+        
+        // 更新记忆
+        await updateSingleMemory(context.memoryId, updatedContent, context.isCharacter, context.characterId);
+        
+        showToast('记忆项更新成功');
+        closeModal('editSingleMemoryModal');
+        
+        // 清理上下文
+        memoryManager.singleMemoryEditContext = null;
+        
+        // 刷新显示
+        if (context.isCharacter) {
+            loadCharacterMemories();
+        } else {
+            loadGlobalMemories();
+        }
+    } catch (error) {
+        console.error('更新记忆项失败:', error);
+        showToast('记忆项更新失败');
+    }
+}
+
+// 删除记忆
+async function deleteMemory(memoryId, isCharacter, characterId) {
+    const confirmMessage = '确定要删除这条记忆吗？';
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+    
+    try {
+        const deleted = await memoryManager.deleteMemory(memoryId, isCharacter, characterId);
+        if (deleted) {
+            showToast('记忆删除成功');
+            
+            // 刷新显示
+            if (isCharacter) {
+                loadCharacterMemories();
+            } else {
+                loadGlobalMemories();
+            }
+        } else {
+            showToast('记忆删除失败');
+        }
+    } catch (error) {
+        console.error('删除记忆失败:', error);
+        showToast('记忆删除失败');
+    }
+}
+
+// 初始化记忆管理页面
+async function initMemoryManagementPage() {
+    
+    // 确保数据已经加载
+    if (!window.contacts || !Array.isArray(window.contacts) || window.contacts.length === 0) {
+        console.log('数据未准备好，等待加载完成...');
+        const dataReady = await waitForDataReady();
+        if (!dataReady) {
+            console.warn('数据加载超时，但继续初始化页面');
+        }
+    }
+    
+    try {
+        // 从现有系统加载数据
+        await loadExistingMemories();
+        
+        // 默认加载全局记忆
+        await loadGlobalMemories();
+        loadCharacterSelector();
+        
+        // 检查角色选择器是否成功加载
+        setTimeout(() => {
+            const characterSelector = document.getElementById('characterSelector');
+            if (characterSelector && characterSelector.options.length <= 1) {
+                loadCharacterSelector();
+            }
+        }, 500);
+        
+    } catch (error) {
+        console.error('初始化记忆管理页面失败:', error);
+        // 即使加载失败也显示界面
+        await loadGlobalMemories();
+        loadCharacterSelector();
+    }
+}
+
+// 从现有记忆系统加载数据
+async function loadExistingMemories() {
+    
+    try {
+        // 加载全局记忆
+        const existingGlobalMemory = await getExistingGlobalMemory();
+        if (existingGlobalMemory && existingGlobalMemory.trim()) {
+            // 清理现有记忆内容
+            const cleanedGlobalMemory = memoryManager.cleanAndValidateMemoryContent(existingGlobalMemory);
+            
+            if (cleanedGlobalMemory) {
+                // 由于现在直接使用indexedDB，不需要操作globalMemories数组
+                console.log('全局记忆已存在于indexedDB中，跳过重复加载');
+                
+                // 如果清理后的内容与原内容不同，更新到现有系统
+                if (cleanedGlobalMemory !== existingGlobalMemory) {
+                    await saveExistingGlobalMemory(cleanedGlobalMemory);
+                }
+            }
+        }
+        
+        // 加载角色记忆
+        if (window.contacts && Array.isArray(window.contacts)) {
+            for (const contact of window.contacts) {
+                if (contact.type === 'private') {
+                    const existingCharacterMemory = await getExistingCharacterMemory(contact.id);
+                    if (existingCharacterMemory && existingCharacterMemory.trim()) {
+                        // 清理现有角色记忆内容
+                        const cleanedCharacterMemory = memoryManager.cleanAndValidateMemoryContent(existingCharacterMemory);
+                        
+                        if (cleanedCharacterMemory) {
+                            // 由于现在直接使用indexedDB，不需要操作characterMemories数组
+                            console.log(`角色${contact.id}的记忆已存在于indexedDB中，跳过重复加载`);
+                            
+                            // 如果清理后的内容与原内容不同，更新到现有系统
+                            if (cleanedCharacterMemory !== existingCharacterMemory) {
+                                await saveExistingCharacterMemory(contact.id, cleanedCharacterMemory);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+    } catch (error) {
+        console.error('加载现有记忆数据失败:', error);
+    }
+}
+
+// 等待数据加载完成的函数
+async function waitForDataReady() {
+    let attempts = 0;
+    const maxAttempts = 20; // 最多等待10秒
+    
+    while (attempts < maxAttempts) {
+        if (window.contacts && Array.isArray(window.contacts) && window.isIndexedDBReady) {
+            console.log(`数据准备完成，contacts数组长度: ${window.contacts.length}`);
+            return true;
+        }
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, 500));
+        console.log(`等待数据加载中... 尝试 ${attempts}/${maxAttempts}`);
+    }
+    
+    console.warn('等待数据加载超时，继续初始化记忆管理页面');
+    return false;
+}
+
+// 页面显示时初始化记忆管理
+document.addEventListener('DOMContentLoaded', function() {
+    // 当显示记忆管理页面时初始化
+    const originalShowPage = showPage;
+    window.showPage = function(pageIdToShow) {
+        originalShowPage(pageIdToShow);
+        if (pageIdToShow === 'memoryManagementPage') {
+            // 等待数据准备完成后再初始化
+            waitForDataReady().then((dataReady) => {
+                if (dataReady) {
+                } else {
+                    console.warn('数据准备超时，但仍尝试初始化页面');
+                }
+                initMemoryManagementPage();
+            });
+        }
+    };
+});
+
+// 集成现有的记忆系统 - 添加接口函数
+async function getExistingGlobalMemory() {
+    if (window.characterMemoryManager) {
+        return await window.characterMemoryManager.getGlobalMemory();
+    }
+    return '';
+}
+
+async function getExistingCharacterMemory(characterId) {
+    if (window.characterMemoryManager) {
+        return await window.characterMemoryManager.getCharacterMemory(characterId);
+    }
+    return null;
+}
+
+async function saveExistingGlobalMemory(content) {
+    if (window.characterMemoryManager) {
+        return await window.characterMemoryManager.saveGlobalMemory(content);
+    }
+    return false;
+}
+
+async function saveExistingCharacterMemory(characterId, content) {
+    if (window.characterMemoryManager) {
+        return await window.characterMemoryManager.saveCharacterMemory(characterId, content);
+    }
+    return false;
+}
+
+// 语音图标生成函数
+function createVoiceIcon(state = 'default') {
+    const baseProps = 'width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"';
+    
+    switch (state) {
+        case 'loading':
+            return `<svg xmlns="http://www.w3.org/2000/svg" ${baseProps} stroke-width="2.5"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6"/></svg>`;
+        case 'playing':
+            return `<svg xmlns="http://www.w3.org/2000/svg" ${baseProps} stroke-width="2.5"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+        default:
+            return `<svg xmlns="http://www.w3.org/2000/svg" ${baseProps} stroke-width="2.5"><path d="M3 10v4 M7 7v10 M12 4v16 M17 7v10 M21 10v4" /></svg>`;
+    }
+}
+
+// ElevenLabs 语音播放功能
 /**
- * [MODIFIED] 播放或停止语音消息 - 直接从前端调用 Minimax API
- * @param {HTMLElement} playerElement - 被点击的播放器元素
+ * [MODIFIED] 播放或停止语音消息 - 支持缓存的 Minimax API
+ * @param {HTMLElement} bubbleElement - 被点击的气泡元素
  * @param {string} text - 需要转换为语音的文本
  * @param {string} voiceId - Minimax 的声音ID
  */
-async function playVoiceMessage(playerElement, text, voiceId) {
-    // 1. 检查 Minimax API 凭证是否已在设置中配置
-    if (!apiSettings.minimaxGroupId || !apiSettings.minimaxApiKey) {
+async function playVoiceMessage(bubbleElement, text, voiceId) {
+    // 1. 直接从localStorage读取 Minimax API 凭证
+    const minimaxGroupId = localStorage.getItem('minimaxGroupId') || '';
+    const minimaxApiKey = localStorage.getItem('minimaxApiKey') || '';
+    
+    if (!minimaxGroupId || !minimaxApiKey) {
         showToast('请在设置中填写 Minimax Group ID 和 API Key');
         return;
     }
@@ -7033,99 +9559,145 @@ async function playVoiceMessage(playerElement, text, voiceId) {
         return;
     }
 
-    // 2. 判断当前点击的播放器是否正在播放
-    const wasPlaying = playerElement === currentPlayingElement && !voiceAudio.paused;
+    // 2. 判断当前点击的气泡是否正在播放
+    const wasPlaying = bubbleElement === currentPlayingElement && !voiceAudio.paused;
 
     // 3. 如果有任何音频正在播放，先停止它
     if (currentPlayingElement) {
         voiceAudio.pause();
         voiceAudio.currentTime = 0;
-        const oldPlayButton = currentPlayingElement.querySelector('.play-button');
-        if (oldPlayButton) oldPlayButton.textContent = '▶';
+        const oldVoiceIcon = currentPlayingElement.querySelector('.voice-icon');
+        if (oldVoiceIcon) oldVoiceIcon.innerHTML = createVoiceIcon();
         currentPlayingElement.classList.remove('playing', 'loading');
     }
 
-    // 4. 如果点击的是正在播放的按钮，则仅停止，然后退出
+    // 4. 如果点击的是正在播放的气泡，则仅停止，然后退出
     if (wasPlaying) {
         currentPlayingElement = null;
         return;
     }
 
-    // 5. 设置当前播放器为活动状态并更新UI
-    currentPlayingElement = playerElement;
-    const playButton = playerElement.querySelector('.play-button');
-    const durationEl = playerElement.querySelector('.duration');
+    // 5. 设置当前气泡为活动状态并更新UI
+    currentPlayingElement = bubbleElement;
+    const voiceIcon = bubbleElement.querySelector('.voice-icon');
 
     try {
         // 显示加载状态
-        playerElement.classList.add('loading');
-        playButton.textContent = '...';
+        bubbleElement.classList.add('loading');
+        if (voiceIcon) voiceIcon.innerHTML = createVoiceIcon('loading');
 
-        // 6. 准备并直接发送 API 请求到 Minimax (纯前端)
-        const groupId = apiSettings.minimaxGroupId;
-        const apiKey = apiSettings.minimaxApiKey;
-        
-        // Minimax API URL，将 GroupId 放在查询参数中
-        const apiUrl = `https://api.minimax.chat/v1/text_to_speech?GroupId=${groupId}`;
-        
-        // 请求体
-        const requestBody = {
-            "voice_id": voiceId,
-            "text": text,
-            "model": "speech-01",
-            "speed": 1.0,
-            "vol": 1.0,
-            "pitch": 0
-        };
+        let audioUrl = null;
+        let fromCache = false;
 
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-                // 授权头，注意这里只用 API Key
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestBody)
-        });
-
-        // 7. 处理 API 响应
-        if (!response.ok) {
-            // 如果请求失败，解析错误信息
-            let errorMsg = `语音服务错误 (状态码: ${response.status})`;
+        // 6. 首先检查语音缓存
+        if (window.VoiceStorageAPI) {
             try {
-                const errorData = await response.json();
-                // 尝试从返回的JSON中获取更具体的错误信息
-                if (errorData && errorData.base_resp && errorData.base_resp.status_msg) {
-                    errorMsg += `: ${errorData.base_resp.status_msg}`;
+                audioUrl = await window.VoiceStorageAPI.getVoiceURL(text, voiceId);
+                if (audioUrl) {
+                    fromCache = true;
+                    console.log('使用语音缓存:', { textLength: text.length, voiceId });
                 }
-            } catch (e) {
-                // 如果解析JSON失败，则直接显示文本响应
-                errorMsg += `: ${await response.text()}`;
+            } catch (error) {
+                console.error('检查语音缓存失败:', error);
             }
-            throw new Error(errorMsg);
         }
 
-        // 8. 处理成功的响应
-        // 服务器返回的是音频数据流，我们将其转换为 Blob
-        const audioBlob = await response.blob();
-        
-        if (!audioBlob || !audioBlob.type.startsWith('audio/')) {
-            console.error("服务器未返回有效的音频。Content-Type:", audioBlob.type);
-            throw new Error(`服务器返回了非预期的内容类型: ${audioBlob.type}`);
+        // 7. 如果缓存中没有，则调用 API 生成语音
+        if (!audioUrl) {
+            console.log('语音缓存未命中，调用API生成语音');
+            
+            const groupId = minimaxGroupId;
+            const apiKey = minimaxApiKey;
+            
+            // Minimax API URL，将 GroupId 放在查询参数中
+            const apiUrl = `https://api.minimax.chat/v1/text_to_speech?GroupId=${groupId}`;
+            
+            // 请求体
+            const requestBody = {
+                "voice_id": voiceId,
+                "text": text,
+                "model": "speech-01",
+                "speed": 1.0,
+                "vol": 1.0,
+                "pitch": 0
+            };
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: {
+                    // 授权头，注意这里只用 API Key
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            });
+
+            console.log('Minimax TTS API Response Status:', response.status);
+            console.log('Minimax TTS API Response Headers:', Object.fromEntries(response.headers.entries()));
+
+            // 处理 API 响应
+            const contentType = response.headers.get('content-type') || '';
+            
+            // 检查是否返回了JSON错误信息（即使状态码是200）
+            if (!response.ok || contentType.includes('application/json')) {
+                let errorMsg = `语音服务错误 (状态码: ${response.status})`;
+                try {
+                    const errorData = await response.json();
+                    console.error('ERROR: Minimax TTS API 返回错误 - 完整返回:', errorData);
+                    
+                    // 尝试从返回的JSON中获取更具体的错误信息
+                    if (errorData && errorData.base_resp && errorData.base_resp.status_msg) {
+                        errorMsg += `: ${errorData.base_resp.status_msg}`;
+                    } else if (errorData && errorData.error) {
+                        errorMsg += `: ${errorData.error}`;
+                    } else if (errorData && errorData.message) {
+                        errorMsg += `: ${errorData.message}`;
+                    } else {
+                        errorMsg += `: ${JSON.stringify(errorData)}`;
+                    }
+                } catch (e) {
+                    // 如果解析JSON失败，则直接显示文本响应
+                    const errorText = await response.text();
+                    console.error('ERROR: Minimax TTS API 返回错误 (文本) - 完整返回:', errorText);
+                    errorMsg += `: ${errorText}`;
+                }
+                throw new Error(errorMsg);
+            }
+
+            // 处理成功的响应
+            // 服务器返回的是音频数据流，我们将其转换为 Blob
+            const audioBlob = await response.blob();
+            
+            if (!audioBlob || !audioBlob.type.startsWith('audio/')) {
+                console.error("服务器未返回有效的音频。Content-Type:", audioBlob.type);
+                throw new Error(`服务器返回了非预期的内容类型: ${audioBlob.type}`);
+            }
+
+            // 8. 保存到缓存（异步进行，不阻塞播放）
+            if (window.VoiceStorageAPI) {
+                window.VoiceStorageAPI.storeVoice(audioBlob, text, voiceId, {
+                    model: "speech-01",
+                    apiSource: "minimax",
+                    generatedAt: new Date().toISOString()
+                }).then(() => {
+                    console.log('语音已保存到缓存:', { textLength: text.length, voiceId });
+                }).catch(error => {
+                    console.error('语音缓存保存失败:', error);
+                });
+            }
+
+            // 创建一个临时的 URL 指向这个 Blob 数据
+            audioUrl = URL.createObjectURL(audioBlob);
         }
 
-        // 创建一个临时的 URL 指向这个 Blob 数据
-        const audioUrl = URL.createObjectURL(audioBlob);
-        
-        // 将这个 URL 设置为音频元素的源
+        // 9. 播放音频
         voiceAudio.src = audioUrl;
 
-        // 当音频元数据加载完成后，显示时长
+        // 当音频元数据加载完成后，显示时长（可选，语音图标方案可以不显示时长）
         voiceAudio.onloadedmetadata = () => {
             if (isFinite(voiceAudio.duration)) {
-                const minutes = Math.floor(voiceAudio.duration / 60);
-                const seconds = Math.floor(voiceAudio.duration % 60).toString().padStart(2, '0');
-                durationEl.textContent = `${minutes}:${seconds}`;
+                // 在新的设计中，我们不需要显示时长，因为没有duration元素
+                console.log('语音时长:', voiceAudio.duration + '秒');
             }
         };
 
@@ -7133,1323 +9705,6238 @@ async function playVoiceMessage(playerElement, text, voiceId) {
         await voiceAudio.play();
 
         // 更新UI为播放状态
-        playerElement.classList.remove('loading');
-        playerElement.classList.add('playing');
-        playButton.textContent = '❚❚';
+        bubbleElement.classList.remove('loading');
+        bubbleElement.classList.add('playing');
+        if (voiceIcon) voiceIcon.innerHTML = createVoiceIcon('playing');
+
+        // 显示缓存状态提示（可选）
+        if (fromCache) {
+            console.log('语音播放成功（来自缓存）');
+        } else {
+            console.log('语音播放成功（来自API）');
+        }
 
     } catch (error) {
-        // 9. 统一处理所有错误
+        // 10. 统一处理所有错误
         console.error('语音播放失败:', error);
         showToast(`语音播放错误: ${error.message}`);
-        playerElement.classList.remove('loading');
-        playButton.textContent = '▶';
+        bubbleElement.classList.remove('loading');
+        if (voiceIcon) voiceIcon.innerHTML = createVoiceIcon();
         currentPlayingElement = null; // 重置当前播放元素
     }
 }
 
-/**
- * 【新增】将自定义气泡的CSS注入到主文档中
- * @param {string} css - 要注入的CSS字符串
- */
-function injectCustomBubbleCSS(css) {
-    const styleId = 'custom-bubble-style-sheet';
-    let styleTag = document.getElementById(styleId);
-    // 如果样式表已存在，先移除，以便更新
-    if (styleTag) {
-        styleTag.remove();
-    }
-    // 如果没有css内容，则不创建
-    if (!css || css.trim() === '/* CSS 已内联，此部分为空 */') {
-        return;
-    }
-    styleTag = document.createElement('style');
-    styleTag.id = styleId;
-    styleTag.innerHTML = css;
-    document.head.appendChild(styleTag);
-}
+// 【【【【【这是你要在 script.js 末尾新增的函数】】】】】
 
-/**
- * 【新增】保存自定义气泡样式到IndexedDB
- */
-// 保留此函数是为了兼容性，但实际上我们已经迁移到新的气泡样式库
-async function saveCustomBubbleStyle() {
-    // 此函数已不再使用
-    console.log('saveCustomBubbleStyle 函数已被弃用，使用 saveBubbleStylesToDB 代替');
-}
-
-/**
- * 【新增】将整个气泡样式库保存到IndexedDB
- */
-async function saveBubbleStylesToDB() {
-    if (!isIndexedDBReady) return;
-    try {
-        const transaction = db.transaction(['bubbleStyles'], 'readwrite');
-        const store = transaction.objectStore('bubbleStyles');
-        // 我们用一个固定的'styles' ID来存储整个样式库对象
-        await promisifyRequest(store.put({ id: 'styles', data: bubbleStyles }));
-        await promisifyTransaction(transaction);
-        console.log('气泡样式库已保存。');
-    } catch (error) {
-        console.error('保存气泡样式库失败:', error);
-        showToast('保存样式库失败');
-    }
-}
-
-/**
- * 【新增】监听来自 iframe (气泡设计器) 的消息
- */
-window.addEventListener('message', (event) => {
-    // 安全性检查，确保消息是我们期望的类型
-    if (event.data && event.data.type === 'apply-bubble-style') {
-        console.log('从设计器收到新的命名气泡样式:', event.data.payload);
-
-        const { id, name, html, css } = event.data.payload;
-
-        // 【核心修改】将新样式存入样式库对象
-        bubbleStyles[id] = { id, name, html, css };
-
-        // 保存整个更新后的样式库到数据库
-        saveBubbleStylesToDB();
-
-        showToast(`新样式 "${name}" 已保存到样式库！`);
-        // 注意：这里不再立即应用，而是等待用户为角色指定
-    }
-});
-
-// =================================================================
-// 新增：电话通讯功能
-// =================================================================
-
-// =================================================================
-// 新增：电话通讯功能的核心辅助函数
-// =================================================================
-
-/**
- * @description 更新通话界面的状态显示
- * @param {string} text - 要显示的文本
- * @param {boolean} isListening - 是否应用"聆听中"的动画效果
- */
-function updateCallStatus(text, isListening = false) {
-    const statusEl = document.getElementById('callStatus');
-    if (statusEl) {
-        statusEl.textContent = text;
-        if (isListening) {
-            statusEl.classList.add('listening');
-        } else {
-            statusEl.classList.remove('listening');
-        }
-    }
-}
-
-/**
- * @description 开始录音，并设置一个自动停止的计时器（模拟人说完话后停顿）
- */
-function startListening() {
-    if (!isCallActive || !mediaRecorder) return;
-    
-    if (mediaRecorder.state === 'inactive') {
-        audioChunks = [];
-        mediaRecorder.start();
-        updateCallStatus('我正在听...', true);
-
-        // 如果用户在5秒内没有说话，自动停止录音并重新开始
-        if (silenceTimeout) clearTimeout(silenceTimeout);
-        silenceTimeout = setTimeout(() => {
-            if (mediaRecorder && mediaRecorder.state === 'recording') {
-                console.log("检测到长时间静音，重新开始聆听。");
-                mediaRecorder.stop(); // 停止录音，但onstop里会判断audioChunks为空，然后重新startListening
-            }
-        }, 5000); // 5秒静音检测
-    }
-}
-
-/**
- * @description [新增] 将 AudioBuffer 重新采样到指定的目标采样率
- * @param {AudioBuffer} audioBuffer - 原始的 AudioBuffer
- * @param {number} targetSampleRate - 目标采样率 (例如: 16000)
- * @returns {Promise<AudioBuffer>} - 一个新的、重采样后的 AudioBuffer
- */
-async function resampleAudioBuffer(audioBuffer, targetSampleRate) {
-    // 如果原始采样率已经是目标采样率，则无需处理，直接返回
-    if (audioBuffer.sampleRate === targetSampleRate) {
-        console.log(`音频采样率已经是 ${targetSampleRate}Hz，无需重采样。`);
-        return audioBuffer;
-    }
-
-    console.log(`正在将采样率从 ${audioBuffer.sampleRate}Hz 重采样到 ${targetSampleRate}Hz...`);
-
-    // 计算新 buffer 的长度
-    const duration = audioBuffer.duration;
-    const numberOfChannels = audioBuffer.numberOfChannels;
-    const newLength = Math.round(duration * targetSampleRate);
-
-    // 创建一个离线音频上下文，它的作用是在后台处理音频，而不直接播放
-    // 关键在于，我们用目标采样率来创建这个上下文
-    const offlineContext = new OfflineAudioContext(numberOfChannels, newLength, targetSampleRate);
-
-    // 创建一个音频源节点，并将原始的、未重采样的音频数据放入其中
-    const source = offlineContext.createBufferSource();
-    source.buffer = audioBuffer;
-
-    // 将音频源连接到离线上下文的"扬声器"（目的地）
-    source.connect(offlineContext.destination);
-
-    // 开始播放（在后台），这将触发重采样过程
-    source.start(0);
-
-    // 开始渲染，这个过程会返回一个 Promise，
-    // 当所有音频处理（包括重采样）完成后，Promise 会解析为一个新的 AudioBuffer
-    const resampledBuffer = await offlineContext.startRendering();
-    
-    console.log("重采样完成。");
-    return resampledBuffer;
-}
-
-/**
- * @description [全新替换] 将 AudioBuffer 转换为 API 兼容的单声道16-bit WAV格式的Blob
- * @param {AudioBuffer} audioBuffer - 经过重采样后的 AudioBuffer
- * @returns {Blob} 标准的单声道 WAV 格式的 Blob 对象
- */
-function audioBufferToMonoWav(audioBuffer) {
-    const buffer = audioBuffer;
-    
-    // 我们强制输出单声道
-    const numberOfChannels = 1; 
-    // 我们强制输出 16-bit 位深
-    const bitsPerSample = 16;
-    
-    const sampleRate = buffer.sampleRate;
-    const blockAlign = numberOfChannels * (bitsPerSample / 8);
-    const byteRate = sampleRate * blockAlign;
-    const dataSize = buffer.length * blockAlign;
-    const bufferSize = 44 + dataSize; // 文件总大小
-
-    const resultBuffer = new ArrayBuffer(bufferSize);
-    const view = new DataView(resultBuffer);
-    let pos = 0;
-
-    // 辅助函数：写入字符串
-    function writeString(str) {
-        for (let i = 0; i < str.length; i++) {
-            view.setUint8(pos++, str.charCodeAt(i));
-        }
-    }
-
-    // 写入标准WAV文件头
-    writeString('RIFF');
-    view.setUint32(pos, 36 + dataSize, true); pos += 4;
-    writeString('WAVE');
-    writeString('fmt ');
-    view.setUint32(pos, 16, true); pos += 4; // Sub-chunk size
-    view.setUint16(pos, 1, true); pos += 2; // PCM format
-    view.setUint16(pos, numberOfChannels, true); pos += 2; // Mono
-    view.setUint32(pos, sampleRate, true); pos += 4;
-    view.setUint32(pos, byteRate, true); pos += 4;
-    view.setUint16(pos, blockAlign, true); pos += 2;
-    view.setUint16(pos, bitsPerSample, true); pos += 2;
-    writeString('data');
-    view.setUint32(pos, dataSize, true); pos += 4;
-
-    // 将多声道数据混合为单声道并写入
-    const monoChannel = new Float32Array(buffer.length);
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-        const channelData = buffer.getChannelData(i);
-        for (let j = 0; j < buffer.length; j++) {
-            // 在混合时累加
-            monoChannel[j] += channelData[j];
-        }
-    }
-    // 取平均值
-    for (let i = 0; i < buffer.length; i++) {
-        monoChannel[i] /= buffer.numberOfChannels;
-    }
-
-    // 写入16-bit PCM数据
-    for (let i = 0; i < monoChannel.length; i++) {
-        let sample = Math.max(-1, Math.min(1, monoChannel[i]));
-        sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-        view.setInt16(pos, sample, true);
-        pos += 2;
-    }
-
-    return new Blob([view], { type: 'audio/wav' });
-}
-
-/**
- * @description 处理录制的音频、获取AI回复并播放
- * @param {Blob} audioBlob - 录制好的音频数据
- */
-async function processAudioAndGetReply(audioBlob) {
-    if (!isCallActive) return;
+async function handleShareData() {
+    const shareBtn = document.getElementById('shareDataBtn');
+    shareBtn.disabled = true;
+    shareBtn.textContent = '生成中...';
 
     try {
-        // 1. 语音转文字 (STT)
-        updateCallStatus('正在理解...', false);
-        // 使用新的 GLM API 进行语音识别，替换旧的 Minimax STT
-        const userText = await window.apiService.callGlmAsrAPI(audioBlob);
+        // 1. 使用你已有的 IndexedDBManager 导出整个数据库的数据
+        const exportData = await dbManager.exportDatabase();
 
-        if (!userText || userText.trim() === '') {
-            console.log("STT 结果为空，重新聆听。");
-            startListening();
-            return;
-        }
-
-        // 2. 将识别的文本添加到聊天记录（可选，但推荐）
-        const userMessage = { role: 'user', content: `[语音] ${userText}`, type: 'text', time: new Date().toISOString(), senderId: 'user' };
-        currentContact.messages.push(userMessage);
-        
-        // 3. 调用AI获取回复
-        updateCallStatus('正在思考...', false);
-        // 我们复用已有的 callAPI 函数，但只处理第一个回复
-        const { replies } = await callAPI(currentContact);
-        
-        if (!replies || replies.length === 0) {
-            throw new Error("AI没有返回有效回复。");
-        }
-        
-        let aiReplyText = replies[0].content; // 只取第一句回复
-        
-        // 【核心修复】检查并移除语音标记，防止被念出来
-        if (aiReplyText.startsWith('[语音]:')) {
-            aiReplyText = aiReplyText.substring(4).trim();
-        }
-
-        // 4. 将AI的回复也添加到聊天记录 (使用清理后的文本)
-        const aiMessage = { role: 'assistant', content: aiReplyText, type: 'text', time: new Date().toISOString(), senderId: currentContact.id, forceVoice: true };
-        currentContact.messages.push(aiMessage);
-        await updateContactInDB(currentContact); // 保存聊天记录
-
-        // 5. 文字转语音 (TTS) (使用清理后的文本)
-        updateCallStatus('对方正在说话...', false);
-        // 复用已有的 playVoiceMessage 逻辑，但需要找到一个播放器元素（我们可以临时创建一个）
-        // 更好的方式是直接调用TTS逻辑
-        await playAIVoice(aiReplyText);
-
-    } catch (error) {
-        console.error("处理语音并回复时出错:", error);
-        showToast(`出错了: ${error.message}`);
-        updateCallStatus('出错了，稍后重试', false);
-        // 出错后，等待2秒再重新开始聆听
-        setTimeout(() => {
-            if (isCallActive) startListening();
-        }, 2000);
-    }
-}
-
-/**
- * @description 播放AI的语音回复，并在播放结束后重新开始聆听
- * @param {string} text - AI的文字回复
- */
-async function playAIVoice(text) {
-    if (!isCallActive) return;
-
-    try {
-        const ttsUrl = `https://api.minimax.chat/v1/text_to_speech?GroupId=${apiSettings.minimaxGroupId}`;
-        const ttsResponse = await fetch(ttsUrl, {
+        // 2. 将数据发送到我们的Vercel中转站
+        const response = await fetch('https://transfer.cdsv.cc/api/transfer-data', {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiSettings.minimaxApiKey}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                "voice_id": currentContact.voiceId,
-                "text": text,
-                "model": "speech-01"
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(exportData),
         });
 
-        if (!ttsResponse.ok) throw new Error(`TTS API 错误: ${ttsResponse.status}`);
+        if (!response.ok) {
+            throw new Error('创建分享链接失败，请稍后重试。');
+        }
 
-        const audioBlob = await ttsResponse.blob();
-        const audioUrl = URL.createObjectURL(audioBlob);
-        
-        voiceAudio.src = audioUrl;
-        voiceAudio.play();
+        const result = await response.json();
+        if (!result.success || !result.id) {
+            throw new Error(result.error || '服务器返回数据格式错误。');
+        }
 
-        // 关键：监听语音播放结束事件
-        voiceAudio.onended = () => {
-            URL.revokeObjectURL(audioUrl); // 清理资源
-            if (isCallActive) {
-                // AI说完后，立即重新开始聆听用户的下一句话
-                startListening();
-            }
-        };
+        // 3. 构造给Vercel应用使用的链接
+        const vercelAppUrl = 'https://chat.whale-llt.top'; 
+        const shareLink = `${vercelAppUrl}/?importId=${result.id}`;
+
+        // 4. 显示分享链接给用户
+        showShareLinkDialog(shareLink);
 
     } catch (error) {
-        console.error("播放AI语音失败:", error);
-        showToast(`语音播放失败: ${error.message}`);
-        // 即使播放失败，也要重新进入聆听状态
-        if (isCallActive) startListening();
+        console.error('分享数据失败:', error);
+        showToast('分享失败: ' + error.message);
+    } finally {
+        shareBtn.disabled = false;
+        shareBtn.textContent = '🔗 分享到新设备';
+    }
+}
+
+// 一个用于显示分享链接的对话框函数
+function showShareLinkDialog(link) {
+    const dialogId = 'shareLinkDialog';
+    let dialog = document.getElementById(dialogId);
+    if (!dialog) {
+        dialog = document.createElement('div');
+        dialog.id = dialogId;
+        dialog.className = 'modal';
+        dialog.innerHTML = `
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div class="modal-title">分享链接已生成</div>
+                    <div class="modal-close" onclick="closeModal('${dialogId}')">关闭</div>
+                </div>
+                <div class="modal-body" style="text-align: center;">
+                    <p style="margin-bottom: 15px; font-size: 14px; color: #666;">请复制以下链接，在新设备或浏览器中打开即可自动导入数据。链接15分钟内有效。</p>
+                    <textarea id="shareLinkTextarea" class="form-textarea" rows="3" readonly>${link}</textarea>
+                    <button class="form-submit" style="margin-top: 15px;" onclick="copyShareLink()">复制链接</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(dialog);
+    } else {
+        document.getElementById('shareLinkTextarea').value = link;
+    }
+    showModal(dialogId);
+}
+
+/**
+ * 复制链接到剪贴板的辅助函数
+ */
+function copyShareLink() {
+    const textarea = document.getElementById('shareLinkTextarea');
+    textarea.select();
+    document.execCommand('copy');
+    showToast('链接已复制！');
+}
+
+/**
+ * 处理从URL自动导入的逻辑
+ */
+async function handleAutoImport(importId) {
+    // 1. 清理URL，防止刷新页面时重复导入
+    window.history.replaceState({}, document.title, window.location.pathname);
+
+    // 2. 显示一个友好的加载提示
+    showToast('检测到分享数据，正在导入...');
+
+    try {
+        // 3. 去Vercel中转站取回数据
+        const transferUrl = `https://transfer.cdsv.cc/api/transfer-data?id=${importId}`;
+        const response = await fetch(transferUrl);
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => null);
+            throw new Error(error?.error || '数据获取失败，链接可能已失效。');
+        }
+
+        const result = await response.json();
+        if (!result.success || !result.data) {
+            throw new Error(result.error || '服务器返回数据格式错误。');
+        }
+
+        const importData = result.data;
+
+        // 4. 使用你已有的导入逻辑 (dataMigrator.js)
+        if (!window.dbManager) {
+            window.dbManager = new IndexedDBManager();
+        }
+        await dbManager.initDB();
+        
+        // 5. 调用导入函数，直接覆盖
+        const importResult = await dbManager.importDatabase(importData, { overwrite: true });
+
+        if (importResult.success) {
+            alert('数据导入成功！页面将自动刷新以应用新数据。');
+            setTimeout(() => {
+                window.location.reload();
+            }, 1500);
+        } else {
+            throw new Error(importResult.error || '导入数据库时发生未知错误。');
+        }
+
+    } catch (error) {
+        console.error('自动导入失败:', error);
+        alert('自动导入失败: ' + error.message + '\n\n即将正常加载页面。');
+        // 如果导入失败，就正常初始化页面
+        await init();
+    }
+}
+
+// === 图片迁移功能 ===
+
+/**
+ * 检查图片迁移状态
+ */
+async function checkImageMigrationStatus() {
+    const statusText = document.getElementById('migrationStatusText');
+    const statusDetails = document.getElementById('migrationStatusDetails');
+    const startMigrationBtn = document.getElementById('startMigrationBtn');
+    
+    try {
+        statusText.textContent = '检查中...';
+        statusDetails.innerHTML = '<div>正在检查图片数据状态...</div>';
+        
+        // 确保迁移管理器已初始化
+        if (!window.ImageMigrationManager) {
+            throw new Error('图片迁移管理器未加载');
+        }
+        
+        await window.ImageMigrationManager.init();
+        
+        // 检查迁移状态
+        const migrationStatus = await window.ImageMigrationManager.checkMigrationNeeded();
+        
+        if (migrationStatus.error) {
+            statusText.textContent = '检查失败';
+            statusDetails.innerHTML = `<div style="color: #dc3545;">错误: ${migrationStatus.error}</div>`;
+            return;
+        }
+        
+        if (!migrationStatus.needed) {
+            statusText.textContent = '✅ 已优化';
+            statusDetails.innerHTML = '<div style="color: #28a745;">太棒了！所有图片数据都已采用高效的存储格式。</div>';
+            startMigrationBtn.disabled = true;
+            startMigrationBtn.textContent = '✅ 无需优化';
+            return;
+        }
+        
+        // 需要迁移
+        statusText.textContent = `${migrationStatus.totalFiles} 个文件待优化`;
+        
+        let detailsHtml = '<div style="margin-bottom: 8px;"><strong>发现以下数据需要优化：</strong></div>';
+        
+        if (migrationStatus.details.contacts.needsMigration > 0) {
+            detailsHtml += `<div>• 联系人头像: ${migrationStatus.details.contacts.needsMigration} 个</div>`;
+        }
+        if (migrationStatus.details.userProfile.needsMigration > 0) {
+            detailsHtml += `<div>• 用户头像: ${migrationStatus.details.userProfile.needsMigration} 个</div>`;
+        }
+        if (migrationStatus.details.emojiImages.needsMigration > 0) {
+            detailsHtml += `<div>• 表情包: ${migrationStatus.details.emojiImages.needsMigration} 个</div>`;
+        }
+        if (migrationStatus.details.backgrounds.needsMigration > 0) {
+            detailsHtml += `<div>• 背景图片: ${migrationStatus.details.backgrounds.needsMigration} 个</div>`;
+        }
+        if (migrationStatus.details.moments.needsMigration > 0) {
+            detailsHtml += `<div>• 朋友圈图片: ${migrationStatus.details.moments.needsMigration} 个</div>`;
+        }
+        
+        // 估算存储空间节省
+        const savings = await window.ImageMigrationManager.estimateStorageSavings(migrationStatus);
+        detailsHtml += `<div style="margin-top: 8px; color: #ff9500;"><strong>预计节省存储空间: ${savings.formattedSavings}</strong></div>`;
+        
+        statusDetails.innerHTML = detailsHtml;
+        startMigrationBtn.disabled = false;
+        startMigrationBtn.textContent = '🚀 开始优化';
+        
+    } catch (error) {
+        console.error('检查迁移状态失败:', error);
+        statusText.textContent = '检查失败';
+        statusDetails.innerHTML = `<div style="color: #dc3545;">检查失败: ${error.message}</div>`;
     }
 }
 
 /**
- * @description 【已重写】开始一个真正的语音通话
+ * 开始图片数据迁移
  */
-async function startPhoneCall() {
-    // 1. 检查并准备
-    if (!currentContact) {
-        showToast('请先选择一个聊天对象再进行通话');
-        return;
-    }
-    if (!apiSettings.minimaxGroupId || !apiSettings.minimaxApiKey) {
-        showToast('请在设置中配置 Minimax Group ID 和 API Key');
-        return;
-    }
-    if (!currentContact.voiceId) {
-        showToast('当前角色没有设置语音ID，无法通话');
-        return;
-    }
-
-    // 2. 显示UI
-    const modal = document.getElementById('phoneCallModal');
-    const avatarEl = document.getElementById('callAvatar');
-    const nameEl = document.getElementById('callName');
+async function startImageMigration() {
+    const statusText = document.getElementById('migrationStatusText');
+    const statusDetails = document.getElementById('migrationStatusDetails');
+    const startMigrationBtn = document.getElementById('startMigrationBtn');
+    const migrationProgress = document.getElementById('migrationProgress');
+    const progressBar = document.getElementById('migrationProgressBar');
+    const progressText = document.getElementById('migrationProgressText');
     
-    nameEl.textContent = currentContact.name;
-    avatarEl.innerHTML = currentContact.avatar 
-        ? `<img src="${currentContact.avatar}" style="width:100%; height:100%; object-fit:cover;">` 
-        : currentContact.name[0];
-    
-    modal.classList.add('active');
-    updateCallStatus('正在连接...');
-
-    // 3. 请求麦克风并设置MediaRecorder
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        isCallActive = true;
-        mediaRecorder = new MediaRecorder(stream);
-
-        // 4. 定义录音器的事件处理
-        mediaRecorder.ondataavailable = (event) => {
-            audioChunks.push(event.data);
+        // 确认操作
+        const confirmed = confirm('开始图片存储优化？\n\n这个过程将：\n• 将现有base64图片转换为高效的文件存储格式\n• 显著减少存储空间占用\n• 提升应用性能\n\n优化过程中请勿关闭页面。');
+        
+        if (!confirmed) {
+            return;
+        }
+        
+        // 禁用按钮，显示进度
+        startMigrationBtn.disabled = true;
+        startMigrationBtn.textContent = '优化中...';
+        migrationProgress.style.display = 'block';
+        statusText.textContent = '优化中...';
+        
+        // 进度回调函数
+        const progressCallback = (progress) => {
+            const percentage = Math.round((progress.current / progress.total) * 100);
+            progressBar.style.width = percentage + '%';
+            progressText.textContent = `正在优化 ${progress.type}: ${progress.item} (${progress.current}/${progress.total})`;
         };
-
-        // [核心修改] 替换 mediaRecorder.onstop 的整个函数体
-        mediaRecorder.onstop = async () => {
-            if (!isCallActive) return; 
-            if (audioChunks.length === 0) {
-                console.log("没有录到音频，重新开始聆听。");
-                startListening();
-                return;
-            }
-
-            try {
-                // 1. 组合录制的 WebM 数据块
-                const webmBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                audioChunks = []; // 清空缓存
-
-                // 2. 转换为 ArrayBuffer 以便解码
-                const arrayBuffer = await webmBlob.arrayBuffer();
-                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                const originalAudioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-                // 3. 【新增步骤】将解码后的音频重采样到 16000Hz
-                const resampledAudioBuffer = await resampleAudioBuffer(originalAudioBuffer, 16000);
-
-                // 4. 【全新】调用一步到位的函数，直接生成单声道WAV文件
-                const wavBlob = audioBufferToMonoWav(resampledAudioBuffer);
-
-                // 5. 将最终的 WAV Blob 传递给处理函数
-                await processAudioAndGetReply(wavBlob);
-
-            } catch (error) {
-                console.error("音频转换或处理失败:", error);
-                showToast(`音频处理失败: ${error.message}`);
-                // 即使失败也要重新开始聆听
-                if (isCallActive) {
-                    startListening();
+        
+        // 执行迁移
+        const result = await window.ImageMigrationManager.performFullMigration(progressCallback);
+        
+        if (result.success) {
+            // 迁移成功
+            statusText.textContent = '✅ 优化完成';
+            progressBar.style.width = '100%';
+            progressText.textContent = '优化完成！';
+            
+            let successHtml = `<div style="color: #28a745; margin-bottom: 8px;"><strong>${result.message}</strong></div>`;
+            
+            if (result.summary) {
+                successHtml += `<div>• 成功优化: ${result.summary.totalSuccess} 个文件</div>`;
+                if (result.summary.totalFailed > 0) {
+                    successHtml += `<div style="color: #dc3545;">• 优化失败: ${result.summary.totalFailed} 个文件</div>`;
                 }
             }
+            
+            successHtml += '<div style="margin-top: 8px; color: #666; font-size: 11px;">图片数据已优化为高效的文件存储格式，存储空间占用显著减少。</div>';
+            
+            statusDetails.innerHTML = successHtml;
+            startMigrationBtn.textContent = '✅ 优化完成';
+            
+            // 显示成功消息
+            if (typeof showToast === 'function') {
+                showToast('图片存储优化完成！存储空间占用已显著减少。');
+            } else {
+                alert('图片存储优化完成！存储空间占用已显著减少。');
+            }
+            
+        } else {
+            // 迁移失败
+            statusText.textContent = '优化失败';
+            statusDetails.innerHTML = `<div style="color: #dc3545;">优化失败: ${result.error}</div>`;
+            startMigrationBtn.disabled = false;
+            startMigrationBtn.textContent = '🚀 重试优化';
+            
+            console.error('图片数据迁移失败:', result);
+        }
+        
+    } catch (error) {
+        console.error('执行图片迁移失败:', error);
+        statusText.textContent = '优化失败';
+        statusDetails.innerHTML = `<div style="color: #dc3545;">优化失败: ${error.message}</div>`;
+        startMigrationBtn.disabled = false;
+        startMigrationBtn.textContent = '🚀 重试优化';
+        
+        if (typeof showToast === 'function') {
+            showToast('图片存储优化失败: ' + error.message);
+        }
+    } finally {
+        // 隐藏进度条
+        setTimeout(() => {
+            migrationProgress.style.display = 'none';
+        }, 3000);
+    }
+}
+
+// === 聊天记录表情包迁移功能 ===
+
+/**
+ * 检查聊天记录表情包迁移状态
+ */
+async function checkChatEmojiMigrationStatus() {
+    const statusText = document.getElementById('chatEmojiMigrationStatusText');
+    const statusDetails = document.getElementById('chatEmojiMigrationStatusDetails');
+    const startMigrationBtn = document.getElementById('startChatEmojiMigrationBtn');
+    
+    try {
+        statusText.textContent = '检查中...';
+        statusDetails.innerHTML = '<div>正在检查聊天记录中的表情包状态...</div>';
+        
+        // 确保迁移管理器已初始化
+        if (!window.ChatEmojiMigrationManager) {
+            throw new Error('聊天记录表情包迁移管理器未加载');
+        }
+        
+        await window.ChatEmojiMigrationManager.init();
+        
+        // 检查迁移状态
+        const migrationStatus = await window.ChatEmojiMigrationManager.checkChatEmojiMigrationNeeded();
+        
+        if (migrationStatus.error) {
+            statusText.textContent = '检查失败';
+            statusDetails.innerHTML = `<div style="color: #dc3545;">错误: ${migrationStatus.error}</div>`;
+            return;
+        }
+        
+        if (!migrationStatus.needed) {
+            statusText.textContent = '✅ 已优化';
+            statusDetails.innerHTML = '<div style="color: #28a745;">太棒了！聊天记录中的表情包都已采用高效的存储格式。</div>';
+            startMigrationBtn.disabled = true;
+            startMigrationBtn.textContent = '✅ 无需优化';
+            return;
+        }
+        
+        // 需要迁移
+        const totalItems = migrationStatus.details.base64EmojisFound + migrationStatus.details.emojiImagesNeedingMigration;
+        statusText.textContent = `${totalItems} 个表情待优化`;
+        
+        let detailsHtml = '<div style="margin-bottom: 8px;"><strong>发现以下数据需要优化：</strong></div>';
+        
+        if (migrationStatus.details.base64EmojisFound > 0) {
+            detailsHtml += `<div>• 聊天记录中的表情: ${migrationStatus.details.base64EmojisFound} 个</div>`;
+            detailsHtml += `<div>• 涉及联系人: ${migrationStatus.details.contactsNeedingMigration} 个</div>`;
+        }
+        
+        if (migrationStatus.details.emojiImagesNeedingMigration > 0) {
+            detailsHtml += `<div>• 表情图片库: ${migrationStatus.details.emojiImagesNeedingMigration} 个</div>`;
+        }
+        
+        // 估算迁移效果
+        const benefits = await window.ChatEmojiMigrationManager.estimateMigrationBenefits(migrationStatus);
+        detailsHtml += `<div style="margin-top: 8px; color: #1890ff;"><strong>预计节省存储空间: ${benefits.formattedSavings}</strong></div>`;
+        detailsHtml += '<div style="color: #666; font-size: 11px;">优化后API调用将使用[emoji:意思]格式，提升兼容性</div>';
+        
+        statusDetails.innerHTML = detailsHtml;
+        startMigrationBtn.disabled = false;
+        startMigrationBtn.textContent = '💬 开始优化';
+        
+    } catch (error) {
+        console.error('检查聊天表情迁移状态失败:', error);
+        statusText.textContent = '检查失败';
+        statusDetails.innerHTML = `<div style="color: #dc3545;">检查失败: ${error.message}</div>`;
+    }
+}
+
+/**
+ * 开始聊天记录表情包迁移
+ */
+async function startChatEmojiMigration() {
+    const statusText = document.getElementById('chatEmojiMigrationStatusText');
+    const statusDetails = document.getElementById('chatEmojiMigrationStatusDetails');
+    const startMigrationBtn = document.getElementById('startChatEmojiMigrationBtn');
+    const migrationProgress = document.getElementById('chatEmojiMigrationProgress');
+    const progressBar = document.getElementById('chatEmojiMigrationProgressBar');
+    const progressText = document.getElementById('chatEmojiMigrationProgressText');
+    
+    try {
+        // 确认操作
+        const confirmed = confirm('开始聊天记录表情包优化？\n\n这个过程将：\n• 将聊天记录中的base64表情转换为高效的文件存储格式\n• 保持API调用兼容性（使用[emoji:意思]格式）\n• 显著减少存储空间占用\n• 提升聊天记录加载性能\n\n优化过程中请勿关闭页面。');
+        
+        if (!confirmed) {
+            return;
+        }
+        
+        // 禁用按钮，显示进度
+        startMigrationBtn.disabled = true;
+        startMigrationBtn.textContent = '优化中...';
+        migrationProgress.style.display = 'block';
+        statusText.textContent = '优化中...';
+        
+        // 进度回调函数
+        const progressCallback = (progress) => {
+            const percentage = Math.round((progress.current / progress.total) * 100);
+            progressBar.style.width = percentage + '%';
+            progressText.textContent = `正在优化 ${progress.type}: ${progress.item} (${progress.current}/${progress.total})`;
         };
         
-        // 5. 首次启动聆听
-        updateCallStatus('接通了！请说话...', false);
-        setTimeout(startListening, 1000); // 延迟一秒给用户反应时间
-
-    } catch (err) {
-        // ▼▼▼ 核心修改 ▼▼▼
-        console.error("麦克风访问失败，错误类型:", err.name, "错误信息:", err.message);
-        // ▲▲▲ 核心修改 ▲▲▲
-        showToast("无法访问麦克风: " + err.name); // 提示更详细的错误类型
-        endPhoneCall(); // 如果失败，则直接结束通话
+        // 执行迁移
+        const result = await window.ChatEmojiMigrationManager.performChatEmojiMigration(progressCallback);
+        
+        if (result.success) {
+            // 迁移成功
+            statusText.textContent = '✅ 优化完成';
+            progressBar.style.width = '100%';
+            progressText.textContent = '优化完成！';
+            
+            let successHtml = `<div style="color: #28a745; margin-bottom: 8px;"><strong>${result.message}</strong></div>`;
+            
+            if (result.results) {
+                successHtml += `<div>• 优化联系人: ${result.results.contactsMigrated} 个</div>`;
+                successHtml += `<div>• 优化表情: ${result.results.base64EmojisMigrated} 个</div>`;
+                successHtml += `<div>• 优化表情图片: ${result.results.emojiImagesMigrated} 个</div>`;
+                
+                if (result.results.errors.length > 0) {
+                    successHtml += `<div style="color: #ffc107;">• 优化失败: ${result.results.errors.length} 个</div>`;
+                }
+            }
+            
+            successHtml += '<div style="margin-top: 8px; color: #666; font-size: 11px;">聊天记录表情包已优化完成，API调用将使用[emoji:意思]格式。</div>';
+            
+            statusDetails.innerHTML = successHtml;
+            startMigrationBtn.textContent = '✅ 优化完成';
+            
+            // 显示成功消息
+            if (typeof showToast === 'function') {
+                showToast('聊天记录表情包优化完成！存储格式已统一。');
+            } else {
+                alert('聊天记录表情包优化完成！存储格式已统一。');
+            }
+            
+            // 刷新当前聊天显示
+            if (window.currentContact) {
+                await renderMessages(false); // 明确指定非初始加载，避免滚动
+            }
+            
+        } else {
+            // 迁移失败
+            statusText.textContent = '优化失败';
+            statusDetails.innerHTML = `<div style="color: #dc3545;">优化失败: ${result.error}</div>`;
+            startMigrationBtn.disabled = false;
+            startMigrationBtn.textContent = '💬 重试优化';
+            
+            console.error('聊天表情迁移失败:', result);
+        }
+        
+    } catch (error) {
+        console.error('执行聊天表情迁移失败:', error);
+        statusText.textContent = '优化失败';
+        statusDetails.innerHTML = `<div style="color: #dc3545;">优化失败: ${error.message}</div>`;
+        startMigrationBtn.disabled = false;
+        startMigrationBtn.textContent = '💬 重试优化';
+        
+        if (typeof showToast === 'function') {
+            showToast('聊天记录表情包优化失败: ' + error.message);
+        }
+    } finally {
+        // 隐藏进度条
+        setTimeout(() => {
+            migrationProgress.style.display = 'none';
+        }, 3000);
     }
 }
+
+// === 自动文件存储迁移功能（版本8→9） ===
 
 /**
- * @description 【已重写】结束电话呼叫并清理资源
+ * 执行文件存储迁移（版本8→9升级时自动调用）
  */
-function endPhoneCall() {
-    isCallActive = false; // 这是最重要的标志位，会中断所有正在进行的操作
-
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-    }
-    
-    // 停止任何可能正在播放的TTS语音
-    if (voiceAudio && !voiceAudio.paused) {
-        voiceAudio.pause();
-        voiceAudio.src = '';
-    }
-    
-    // 清理计时器和资源
-    if (silenceTimeout) clearTimeout(silenceTimeout);
-    mediaRecorder = null;
-    audioChunks = [];
-
-    // 关闭UI
-    const modal = document.getElementById('phoneCallModal');
-    modal.classList.remove('active');
-    updateCallStatus('通话结束', false);
-}
-// =================================================================
-// 新增：侧边栏功能逻辑
-// =================================================================
-
-document.addEventListener('DOMContentLoaded', () => {
-    // 确保在DOM加载完毕后获取元素
-    const hamburgerBtn = document.getElementById('hamburger-btn');
-    const sidebarMenu = document.getElementById('sidebar-menu');
-    const sidebarOverlay = document.getElementById('sidebar-overlay');
-
-    // 如果元素不存在，则不执行后续操作，防止报错
-    if (!hamburgerBtn || !sidebarMenu || !sidebarOverlay) {
-        console.error('Sidebar elements not found!');
-        return;
-    }
-
-    // 打开侧边栏的函数
-    function openSidebar() {
-        sidebarMenu.classList.add('open');
-        sidebarOverlay.classList.add('active');
-    }
-
-    // 关闭侧边栏的函数
-    function closeSidebar() {
-        sidebarMenu.classList.remove('open');
-        sidebarOverlay.classList.remove('active');
-    }
-
-    // 点击汉堡按钮时，打开侧边栏
-    hamburgerBtn.addEventListener('click', openSidebar);
-
-    // 点击遮罩层时，关闭侧边栏
-    sidebarOverlay.addEventListener('click', closeSidebar);
-
-    // --- 【新增功能】为侧边栏添加右滑关闭手势 ---
-    let touchstartX = 0;
-    let touchendX = 0;
-
-    // 监听侧边栏上的手指触摸开始事件
-    sidebarMenu.addEventListener('touchstart', function(event) {
-        // 记录下手指开始滑动时的水平位置 (X坐标)
-        touchstartX = event.changedTouches[0].screenX;
-    }, false);
-
-    // 监听侧边栏上的手指触摸结束事件
-    sidebarMenu.addEventListener('touchend', function(event) {
-        // 记录下手指离开屏幕时的水平位置 (X坐标)
-        touchendX = event.changedTouches[0].screenX;
-        // 调用处理函数来判断是否是有效的右滑
-        handleSwipeGesture();
-    }, false);
-
-    function handleSwipeGesture() {
-        // 检查滑动的方向和距离
-        // 条件1: touchendX > touchstartX  (结束位置比开始位置更靠右，说明是向右滑)
-        // 条件2: touchendX - touchstartX > 50 (滑动的距离要超过50像素，防止误触)
-        if (touchendX - touchstartX > 50) {
-            // 检查侧边栏当前是否是打开状态
-            // 如果 class 列表中包含 'open'，说明它是打开的
-            if (sidebarMenu.classList.contains('open')) {
-                // 调用我们已经写好的 closeSidebar 函数来关闭它
-                closeSidebar();
+async function performFileStorageMigration() {
+    try {
+        console.log('开始执行文件存储自动迁移...');
+        
+        if (!window.isIndexedDBReady) {
+            console.error('数据库未准备就绪，无法执行迁移');
+            return;
+        }
+        
+        // 等待所有管理器初始化完成
+        let attempts = 0;
+        const maxAttempts = 10;
+        
+        while (attempts < maxAttempts) {
+            if (window.ImageMigrationManager && window.ChatEmojiMigrationManager) {
+                break;
+            }
+            console.log(`等待迁移管理器初始化... (${attempts + 1}/${maxAttempts})`);
+            await new Promise(resolve => setTimeout(resolve, 500));
+            attempts++;
+        }
+        
+        if (!window.ImageMigrationManager || !window.ChatEmojiMigrationManager) {
+            console.error('迁移管理器未加载，跳过自动迁移');
+            return;
+        }
+        
+        console.log('开始自动迁移步骤1：基础图片数据迁移');
+        
+        // 步骤1：首先执行基础图片迁移（头像、背景、表情包图片）
+        try {
+            await window.ImageMigrationManager.init();
+            const imageMigrationStatus = await window.ImageMigrationManager.checkMigrationNeeded();
+            
+            if (imageMigrationStatus.needed) {
+                console.log(`发现 ${imageMigrationStatus.totalFiles} 个图片文件需要迁移`);
+                
+                const imageResult = await window.ImageMigrationManager.performFullMigration((progress) => {
+                    console.log(`迁移进度: ${progress.type} - ${progress.item} (${progress.current}/${progress.total})`);
+                });
+                
+                if (imageResult.success) {
+                    console.log('基础图片数据迁移完成:', imageResult.summary);
+                } else {
+                    console.error('基础图片数据迁移失败:', imageResult.error);
+                }
+            } else {
+                console.log('无需进行基础图片数据迁移');
+            }
+        } catch (error) {
+            console.error('基础图片迁移过程出错:', error);
+        }
+        
+        console.log('开始自动迁移步骤2：聊天记录表情包迁移');
+        
+        // 步骤2：然后执行聊天记录表情包迁移
+        try {
+            await window.ChatEmojiMigrationManager.init();
+            const chatEmojiStatus = await window.ChatEmojiMigrationManager.checkChatEmojiMigrationNeeded();
+            
+            if (chatEmojiStatus.needed) {
+                const totalEmojis = chatEmojiStatus.details.base64EmojisFound + chatEmojiStatus.details.emojiImagesNeedingMigration;
+                console.log(`发现 ${totalEmojis} 个聊天表情需要迁移`);
+                
+                const chatResult = await window.ChatEmojiMigrationManager.performChatEmojiMigration((progress) => {
+                    console.log(`聊天表情迁移进度: ${progress.type} - ${progress.item} (${progress.current}/${progress.total})`);
+                });
+                
+                if (chatResult.success) {
+                    console.log('聊天记录表情包迁移完成:', chatResult.results);
+                } else {
+                    console.error('聊天记录表情包迁移失败:', chatResult.error);
+                }
+            } else {
+                console.log('无需进行聊天记录表情包迁移');
+            }
+        } catch (error) {
+            console.error('聊天表情迁移过程出错:', error);
+        }
+        
+        console.log('文件存储自动迁移流程完成');
+        
+        // 刷新当前聊天显示（如果有的话）
+        if (window.currentContact) {
+            try {
+                await renderMessages(false); // 明确指定非初始加载，避免滚动
+                console.log('聊天界面已刷新');
+            } catch (error) {
+                console.warn('刷新聊天界面失败:', error);
             }
         }
+        
+    } catch (error) {
+        console.error('文件存储自动迁移失败:', error);
     }
-    // --- 【新增功能结束】 ---
+}
+
+// --- 个人主页功能 ---
+let currentUserProfileContact = null;
+let userProfilePreviousPage = 'profilePage'; // 记录从哪个页面进入的个人主页
+
+// 显示用户个人主页（自己的主页）
+async function showUserProfile() {
+    currentUserProfileContact = null; // 表示是自己的主页
+    userProfilePreviousPage = 'profilePage'; // 从个人信息页面进入
+    showPage('userProfilePage');
+    
+    // 确保数据已加载
+    await waitForDataReady();
+    await loadUserProfileData();
+}
+
+// 显示其他用户的个人主页
+async function showContactProfile(contact) {
+    currentUserProfileContact = contact;
+    userProfilePreviousPage = 'momentsPage'; // 从朋友圈进入
+    showPage('userProfilePage');
+    
+    // 确保数据已加载
+    await waitForDataReady();
+    await loadUserProfileData();
+}
+
+// 从个人主页返回
+function goBackFromUserProfile() {
+    showPage(userProfilePreviousPage);
+}
+
+// 加载个人主页数据
+async function loadUserProfileData() {
+    try {
+        const userProfileBanner = document.getElementById('userProfileBanner');
+        const userProfileAvatar = document.getElementById('userProfileAvatar');
+        const userProfileName = document.getElementById('userProfileName');
+        const userProfileMomentsList = document.getElementById('userProfileMomentsList');
+        const userProfileMomentsEmpty = document.querySelector('.user-profile-moments-empty');
+        
+        
+        if (currentUserProfileContact) {
+            // 显示联系人的主页
+            const contact = currentUserProfileContact;
+            
+            // 设置头像 - 使用getAvatarHTML获取头像内容
+            try {
+                const avatarHTML = await getAvatarHTML(contact, 'contact', 'user-profile-avatar-inner');
+                if (avatarHTML.includes('<img')) {
+                    // 如果是图片，提取src并设置为背景图片
+                    const srcMatch = avatarHTML.match(/src="([^"]+)"/);
+                    if (srcMatch) {
+                        userProfileAvatar.style.backgroundImage = `url(${srcMatch[1]})`;
+                        userProfileAvatar.textContent = '';
+                    } else {
+                        // 回退到旧逻辑
+                        userProfileAvatar.style.backgroundImage = '';
+                        userProfileAvatar.textContent = contact.name?.charAt(0) || '?';
+                    }
+                } else {
+                    // 如果是文字头像
+                    userProfileAvatar.style.backgroundImage = '';
+                    userProfileAvatar.textContent = contact.name?.charAt(0) || '?';
+                }
+            } catch (error) {
+                console.warn('获取联系人头像失败，使用回退逻辑:', error);
+                if (contact.avatar) {
+                    userProfileAvatar.style.backgroundImage = `url(${contact.avatar})`;
+                    userProfileAvatar.textContent = '';
+                } else {
+                    userProfileAvatar.style.backgroundImage = '';
+                    userProfileAvatar.textContent = contact.name?.charAt(0) || '?';
+                }
+            }
+            
+            // 设置用户名，如果是临时联系人则显示特殊样式
+            userProfileName.textContent = contact.name || '未知用户';
+            if (contact.isTemporary) {
+                userProfileName.style.color = '#ff6b6b';
+                userProfileName.style.fontSize = '18px';
+            } else {
+                userProfileName.style.color = '#fff';
+                userProfileName.style.fontSize = '20px';
+            }
+            
+            // 设置banner背景（临时联系人使用不同颜色）
+            if (contact.isTemporary) {
+                userProfileBanner.style.background = 'linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%)';
+            } else {
+                userProfileBanner.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+            }
+            
+        } else {
+            // 显示自己的主页
+            const userProfile = await getUserProfile();
+            
+            // 设置头像 - 使用getAvatarHTML获取头像内容，支持新的文件系统
+            try {
+                const avatarHTML = await getAvatarHTML(userProfile, 'user', 'user-profile-avatar-inner');
+                if (avatarHTML.includes('<img')) {
+                    // 如果是图片，提取src并设置为背景图片
+                    const srcMatch = avatarHTML.match(/src="([^"]+)"/);
+                    if (srcMatch) {
+                        userProfileAvatar.style.backgroundImage = `url(${srcMatch[1]})`;
+                        userProfileAvatar.textContent = '';
+                    } else {
+                        // 回退到旧逻辑
+                        userProfileAvatar.style.backgroundImage = '';
+                        userProfileAvatar.textContent = userProfile.name?.charAt(0) || '我';
+                        console.log('设置头像文字（解析失败）:', userProfile.name?.charAt(0) || '我');
+                    }
+                } else {
+                    // 如果是文字头像
+                    userProfileAvatar.style.backgroundImage = '';
+                    userProfileAvatar.textContent = userProfile.name?.charAt(0) || '我';
+                }
+            } catch (error) {
+                console.warn('获取用户头像失败，使用回退逻辑:', error);
+                if (userProfile.avatar) {
+                    userProfileAvatar.style.backgroundImage = `url(${userProfile.avatar})`;
+                    userProfileAvatar.textContent = '';
+                    console.log('设置头像图片（回退）:', userProfile.avatar);
+                } else {
+                    userProfileAvatar.style.backgroundImage = '';
+                    userProfileAvatar.textContent = userProfile.name?.charAt(0) || '我';
+                    console.log('设置头像文字（回退）:', userProfile.name?.charAt(0) || '我');
+                }
+            }
+            
+            // 设置用户名
+            userProfileName.textContent = userProfile.name || '我的昵称';
+            
+            // 设置banner背景
+            userProfileBanner.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        }
+        
+        // 加载朋友圈动态
+        await loadUserProfileMoments();
+        
+    } catch (error) {
+        console.error('加载个人主页数据失败:', error);
+    }
+}
+
+// 获取所有朋友圈动态
+async function getAllMoments() {
+    
+    // 确保数据已加载
+    if (!window.moments && (!moments || moments.length === 0)) {
+        await waitForDataReady();
+    }
+    
+    return window.moments || moments || [];
+}
+
+// 加载用户的朋友圈动态
+async function loadUserProfileMoments() {
+    try {
+        const userProfileMomentsList = document.getElementById('userProfileMomentsList');
+        const userProfileMomentsEmpty = document.querySelector('.user-profile-moments-empty');
+        
+        // 获取朋友圈数据
+        const moments = await getAllMoments();
+        
+        // 过滤出当前用户的动态
+        let userMoments = [];
+        
+        if (currentUserProfileContact) {
+            // 显示联系人的动态
+            console.log('筛选联系人动态，联系人姓名:', currentUserProfileContact.name);
+            userMoments = moments.filter(moment => 
+                moment.authorName === currentUserProfileContact.name
+            );
+        } else {
+            // 显示自己的动态（作者是"我"或用户设置的昵称）
+            const userProfile = await getUserProfile();
+            const userName = userProfile.name || '我的昵称';
+            userMoments = moments.filter(moment => 
+                moment.authorName === '我' || moment.authorName === userName
+            );
+            
+            // 如果没有找到，也尝试匹配所有动态的作者名
+            if (userMoments.length === 0) {
+                moments.forEach((moment, index) => {
+                });
+            }
+        }
+        
+        if (userMoments.length === 0) {
+            userProfileMomentsEmpty.style.display = 'block';
+            userProfileMomentsList.style.display = 'none';
+        } else {
+            userProfileMomentsEmpty.style.display = 'none';
+            userProfileMomentsList.style.display = 'block';
+            
+            // 清空现有内容
+            userProfileMomentsList.innerHTML = '';
+            
+            // 渲染朋友圈动态
+            for (const moment of userMoments) {
+                const momentElement = await createUserProfileMomentElement(moment);
+                userProfileMomentsList.appendChild(momentElement);
+            }
+        }
+        
+    } catch (error) {
+        console.error('加载用户朋友圈动态失败:', error);
+    }
+}
+
+// 切换朋友圈菜单显示/隐藏
+function toggleMomentMenu(momentId) {
+    const menu = document.getElementById(`momentMenu-${momentId}`);
+    const allMenus = document.querySelectorAll('.moment-menu');
+    
+    // 关闭所有其他菜单
+    allMenus.forEach(m => {
+        if (m !== menu) {
+            m.style.display = 'none';
+        }
+    });
+    
+    // 切换当前菜单
+    if (menu) {
+        menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+    }
+}
+
+// 重新生成朋友圈图片
+async function regenerateMomentImage(momentId) {
+    try {
+        // 检查朋友圈操作是否被锁定
+        if (window.momentsLockManager && window.momentsLockManager.checkLocked()) {
+            return;
+        }
+        
+        // 关闭菜单
+        const menu = document.getElementById(`momentMenu-${momentId}`);
+        if (menu) menu.style.display = 'none';
+        
+        // 找到对应的朋友圈
+        const moment = moments.find(m => m.id === momentId);
+        if (!moment) {
+            showToast('找不到指定的朋友圈');
+            return;
+        }
+        
+        // 检查是否有原始内容可以重新生成图片
+        if (!moment.content && !moment.originalContent) {
+            showToast('该朋友圈没有内容，无法生成图片');
+            return;
+        }
+        
+        const unsplashKey = localStorage.getItem('forumUnsplashApiKey') || localStorage.getItem('unsplashApiKey');
+        if (!unsplashKey) {
+            showToast('请先配置Unsplash API Key');
+            return;
+        }
+        
+        showToast('正在重新生成图片...');
+        
+        // 使用朋友圈内容生成图片
+        const contentForImage = moment.originalContent || moment.content;
+        const imageUrl = await fetchMatchingImageForPublish(contentForImage, unsplashKey);
+        
+        if (imageUrl) {
+            // 直接保存Unsplash URL，不存储到IndexedDB
+            moment.image = imageUrl;
+            moment.imageCount = 1;
+            moment.isUnsplashImage = true; // 标记为Unsplash图片
+            // 清除本地存储的图片ID（如果之前有的话）
+            delete moment.imageFileIds;
+            
+            // 更新数据库
+            await saveDataToDB();
+            
+            // 重新渲染朋友圈
+            await renderMomentsList();
+            
+            showToast('图片已重新生成！');
+        } else {
+            showToast('图片生成失败，请稍后重试');
+        }
+    } catch (error) {
+        console.error('重新生成朋友圈图片失败:', error);
+        showToast('图片生成失败: ' + error.message);
+    }
+}
+
+// 删除朋友圈图片
+async function removeMomentImage(momentId) {
+    try {
+        // 关闭菜单
+        const menu = document.getElementById(`momentMenu-${momentId}`);
+        if (menu) menu.style.display = 'none';
+        
+        // 找到对应的朋友圈
+        const moment = moments.find(m => m.id === momentId);
+        if (!moment) {
+            showToast('找不到指定的朋友圈');
+            return;
+        }
+        
+        // 检查是否有图片可以删除
+        if (!moment.image && (!moment.imageFileIds || moment.imageFileIds.length === 0)) {
+            showToast('该朋友圈没有图片，无需删除');
+            return;
+        }
+        
+        // 删除图片相关数据
+        delete moment.image;
+        delete moment.imageFileIds;
+        delete moment.isUnsplashImage;
+        moment.imageCount = 0;
+        
+        // 更新数据库
+        await saveDataToDB();
+        
+        // 重新渲染朋友圈
+        await renderMomentsList();
+        
+        showToast('图片已删除');
+    } catch (error) {
+        console.error('删除朋友圈图片失败:', error);
+        showToast('删除图片失败: ' + error.message);
+    }
+}
+
+// 重新生成评论
+async function regenerateComments(momentId) {
+    try {
+        // 检查朋友圈操作是否被锁定
+        if (window.momentsLockManager && window.momentsLockManager.checkLocked()) {
+            return;
+        }
+        
+        // 关闭菜单
+        const menu = document.getElementById(`momentMenu-${momentId}`);
+        if (menu) menu.style.display = 'none';
+        
+        // 找到对应的朋友圈
+        const momentIndex = moments.findIndex(m => m.id === momentId);
+        if (momentIndex === -1) {
+            showToast('未找到要重新生成评论的朋友圈');
+            return;
+        }
+        
+        const moment = moments[momentIndex];
+        showToast('正在重新生成评论...');
+        
+        // 清空现有评论和点赞
+        moment.comments = [];
+        moment.likes = 0;
+        
+        // 重新生成评论
+        const newComments = await generateAICommentsWithCurrentTime(moment.content);
+        moment.comments = newComments;
+        
+        // 保存并重新渲染
+        await saveDataToDB();
+        await renderMomentsList();
+        
+        showToast('评论重新生成完成！');
+        
+    } catch (error) {
+        console.error('重新生成评论失败:', error);
+        showApiError(error);
+    }
+}
+
+// 点击页面其他地方关闭所有菜单
+document.addEventListener('click', function(event) {
+    if (!event.target.closest('.moment-menu-btn') && !event.target.closest('.moment-menu')) {
+        const allMenus = document.querySelectorAll('.moment-menu');
+        allMenus.forEach(menu => {
+            menu.style.display = 'none';
+        });
+    }
 });
 
-// 这是一个辅助函数，用于处理侧边栏项目的点击
-// 它会先执行你指定的操作（比如打开一个弹窗），然后自动关闭侧边栏
-/**
- * 【新增】处理从设置菜单点击"恢复默认气泡"的事件
- */
-function handleRestoreDefaultBubble() {
-    // 调用我们第一步创建的核心函数
-    restoreDefaultBubbleStyle();
-    // 操作后关闭菜单
-    toggleSettingsMenu(true);
+// 处理朋友圈头像点击事件
+
+function toggleMomentActions(momentId) {
+    const menu = document.getElementById(`momentActions-${momentId}`);
+    if (!menu) {
+        console.error('Menu not found for moment:', momentId);
+        return;
+    }
+
+    const allMenus = document.querySelectorAll('.moment-actions-menu');
+    const isActive = menu.classList.contains('active');
+
+    // 统一先关闭所有菜单
+    allMenus.forEach(m => {
+        m.classList.remove('active');
+    });
+
+    if (!isActive) {
+        menu.classList.add('active');
+    }
+
+    // 点击外部关闭菜单的逻辑（保留，但可以简化）
+    if (!isActive) {
+        setTimeout(() => {
+            const closeHandler = (e) => {
+                if (!e.target.closest('.moment-collapse-btn')) {
+                     menu.classList.remove('active');
+                     document.removeEventListener('click', closeHandler, true);
+                }
+            };
+            document.addEventListener('click', closeHandler, true);
+        }, 0);
+    }
 }
 
-function handleSidebarClick(actionFunction) {
-    // 1. 执行传入的函数
-    if (typeof actionFunction === 'function') {
-        actionFunction();
+// 点赞朋友圈
+async function likeMoment(momentId) {
+    try {
+        const userProfile = await getUserProfile();
+        const userName = userProfile.name || '我';
+        
+        const momentIndex = moments.findIndex(m => m.id === momentId);
+        if (momentIndex === -1) return;
+        
+        const moment = moments[momentIndex];
+        
+        // 初始化点赞列表
+        if (!moment.likes) {
+            moment.likes = [];
+        }
+        
+        // 检查是否已点赞
+        const hasLiked = moment.likes.includes(userName);
+        
+        if (hasLiked) {
+            // 取消点赞
+            moment.likes = moment.likes.filter(name => name !== userName);
+            showToast('已取消点赞');
+        } else {
+            // 添加点赞
+            moment.likes.push(userName);
+            showToast('点赞成功');
+        }
+        
+        // 保存并重新渲染
+        await saveDataToDB();
+        
+        // 检测当前在哪个页面
+        const userProfilePage = document.getElementById('userProfilePage');
+        const isInUserProfile = userProfilePage && userProfilePage.classList.contains('active');
+        
+        if (isInUserProfile) {
+            // 如果在个人主页，重新加载个人主页的朋友圈
+            await loadUserProfileMoments();
+        } else {
+            // 如果在发现页面，重新渲染发现页面
+            await renderMomentsList();
+        }
+        
+        // 关闭菜单
+        const menu = document.getElementById(`momentActions-${momentId}`);
+        if (menu) menu.classList.remove('active');
+        
+    } catch (error) {
+        console.error('点赞失败:', error);
+        showToast('点赞失败');
+    }
+}
+
+// 显示朋友圈评论框
+function showMomentComment(momentId) {
+    // 检测当前在哪个页面
+    const userProfilePage = document.getElementById('userProfilePage');
+    const isInUserProfile = userProfilePage && userProfilePage.classList.contains('active');
+    
+    let replyContainer;
+    if (isInUserProfile) {
+        // 在个人主页，查找个人主页的回复容器
+        replyContainer = userProfilePage.querySelector(`#momentMainReply-${momentId}`);
+    } else {
+        // 在发现页面，查找发现页面的回复容器
+        replyContainer = document.getElementById(`momentMainReply-${momentId}`);
     }
     
-    // 2. 关闭侧边栏
-    const sidebarMenu = document.getElementById('sidebar-menu');
-    const sidebarOverlay = document.getElementById('sidebar-overlay');
-    if (sidebarMenu && sidebarOverlay) {
-        sidebarMenu.classList.remove('open');
-        sidebarOverlay.classList.remove('active');
+    if (!replyContainer) {
+        console.error('Reply container not found for moment:', momentId);
+        return;
+    }
+    
+    const textarea = replyContainer.querySelector('.moment-reply-input');
+    
+    replyContainer.classList.add('active');
+    window.UIManager.safeFocus(textarea, { delay: 100 });
+    
+    // 关闭菜单（发现页面才有菜单）
+    if (!isInUserProfile) {
+        const menu = document.getElementById(`momentActions-${momentId}`);
+        if (menu) menu.classList.remove('active');
     }
 }
 
-// =================================================================
-// 新增：处理来自气泡设计器 iframe 的消息
-// =================================================================
-
-/**
- * 监听并处理来自气泡设计器iframe的消息请求
- * @param {MessageEvent} event - 消息事件对象
- */
-async function handleBubbleDesignerMessages(event) {
-    // 安全性检查：可以简单地通过消息类型来判断是否是我们需要的消息
-    if (!event.data || !event.data.type || !event.data.type.startsWith('BUBBLE_')) {
+// 隐藏朋友圈评论框
+function hideMomentComment(momentId) {
+    // 检测当前在哪个页面
+    const userProfilePage = document.getElementById('userProfilePage');
+    const isInUserProfile = userProfilePage && userProfilePage.classList.contains('active');
+    
+    let replyContainer;
+    if (isInUserProfile) {
+        // 在个人主页，查找个人主页的回复容器
+        replyContainer = userProfilePage.querySelector(`#momentMainReply-${momentId}`);
+    } else {
+        // 在发现页面，查找发现页面的回复容器
+        replyContainer = document.getElementById(`momentMainReply-${momentId}`);
+    }
+    
+    if (!replyContainer) {
+        console.error('Reply container not found for moment:', momentId);
         return;
     }
-
-    if (!isIndexedDBReady) {
-        console.error('主应用数据库尚未准备好，无法处理贴图请求');
-        return;
-    }
-
-    const { type, payload } = event.data;
-
-    try {
-        switch (type) {
-            // iframe准备就绪，请求获取所有贴图
-            case 'BUBBLE_DESIGNER_READY': {
-                const transaction = db.transaction(['bubbleStickers'], 'readonly');
-                const store = transaction.objectStore('bubbleStickers');
-                const stickers = await promisifyRequest(store.getAll());
-                // 将贴图数据发送回iframe
-                event.source.postMessage({ type: 'LOAD_STICKERS', payload: stickers }, event.origin);
-                break;
-            }
-
-            // iframe请求保存（新增或更新）一个贴图
-            case 'SAVE_STICKER': {
-                const transaction = db.transaction(['bubbleStickers'], 'readwrite');
-                const store = transaction.objectStore('bubbleStickers');
-                await promisifyRequest(store.put(payload)); // put方法会自动处理新增和更新
-                console.log('贴图已保存到IndexedDB:', payload.id);
-                break;
-            }
-
-            // iframe请求删除一个贴图
-            case 'DELETE_STICKER': {
-                const transaction = db.transaction(['bubbleStickers'], 'readwrite');
-                const store = transaction.objectStore('bubbleStickers');
-                await promisifyRequest(store.delete(payload)); // payload此时是stickerId
-                console.log('贴图已从IndexedDB删除:', payload);
-                break;
-            }
-            
-            // 【新增】iframe请求恢复默认气泡
-            case 'BUBBLE_RESTORE_DEFAULT': {
-                await restoreDefaultBubbleStyle();
-                break;
-            }
-        }
-    } catch (error) {
-        console.error(`处理iframe消息时发生错误 (类型: ${type}):`, error);
-    }
+    
+    const textarea = replyContainer.querySelector('.moment-reply-input');
+    
+    replyContainer.classList.remove('active');
+    textarea.value = '';
 }
 
-/**
- * 【新增】恢复默认气泡样式的核心函数
- */
-async function restoreDefaultBubbleStyle() {
+// 提交朋友圈评论
+async function submitMomentComment(momentId) {
     try {
-        // 我们可以保留这个函数用于重置当前联系人的气泡样式
-        if (currentContact && currentContact.bubbleStyleId) {
-            // 清除当前联系人的气泡样式ID
-            currentContact.bubbleStyleId = '';
-            
-            // 保存更改
-            await updateContactInDB(currentContact);
-            
-            // 重新渲染当前聊天
-            renderMessages(true);
-            
-            showToast('已为当前联系人恢复默认气泡样式');
+        const userProfile = await getUserProfile();
+        const userName = userProfile.name || '我';
+        
+        // 检测当前在哪个页面
+        const userProfilePage = document.getElementById('userProfilePage');
+        const isInUserProfile = userProfilePage && userProfilePage.classList.contains('active');
+        
+        let replyContainer;
+        if (isInUserProfile) {
+            // 在个人主页，查找个人主页的回复容器
+            replyContainer = userProfilePage.querySelector(`#momentMainReply-${momentId}`);
         } else {
-            showToast('当前联系人未设置自定义气泡样式');
+            // 在发现页面，查找发现页面的回复容器
+            replyContainer = document.getElementById(`momentMainReply-${momentId}`);
         }
+        
+        if (!replyContainer) {
+            console.error('Reply container not found for moment:', momentId);
+            return;
+        }
+        
+        const textarea = replyContainer.querySelector('.moment-reply-input');
+        const content = textarea.value.trim();
+        
+        if (!content) {
+            showToast('请输入评论内容');
+            return;
+        }
+        
+        const momentIndex = moments.findIndex(m => m.id === momentId);
+        if (momentIndex === -1) return;
+        
+        const moment = moments[momentIndex];
+        
+        // 添加用户评论
+        const newComment = {
+            author: userName,
+            content: content,
+            like: false,
+            timestamp: new Date().toISOString()
+        };
+        
+        if (!moment.comments) {
+            moment.comments = [];
+        }
+        
+        moment.comments.push(newComment);
+        
+        // 保存并重新渲染
+        await saveDataToDB();
+        
+        if (isInUserProfile) {
+            // 如果在个人主页，重新加载个人主页的朋友圈
+            await loadUserProfileMoments();
+        } else {
+            // 如果在发现页面，重新渲染发现页面
+            await renderMomentsList();
+        }
+        
+        showToast('评论成功');
+        
+        // 触发楼主回复
+        setTimeout(() => {
+            generateMomentAuthorReply(momentId, userName, content);
+        }, 1000);
+        
     } catch (error) {
-        console.error('恢复默认气泡样式失败:', error);
-        showToast('操作失败');
+        console.error('评论失败:', error);
+        showToast('评论失败');
     }
 }
 
-// 在主窗口上添加消息监听器
-window.addEventListener('message', handleBubbleDesignerMessages);
+// 显示评论回复框
+function showCommentReply(commentId, authorName, momentId) {
+    const replyContainer = document.getElementById(`${commentId}-reply`);
+    const textarea = replyContainer.querySelector('.moment-reply-input');
+    
+    replyContainer.classList.add('active');
+    window.UIManager.safeFocus(textarea, { delay: 100 });
+    textarea.setAttribute('placeholder', `回复${authorName}...`);
+}
 
-let memoryFactsShowInactive = false;
-let memoryFactsCacheForUI = [];
-let lastTriggeredMemoryFactsDebug = {
-    contactId: null,
-    contactName: '',
-    queryText: '',
-    triggeredAt: null,
-    facts: []
+// 隐藏评论回复框
+function hideCommentReply(commentId) {
+    const replyContainer = document.getElementById(`${commentId}-reply`);
+    const textarea = replyContainer.querySelector('.moment-reply-input');
+    
+    replyContainer.classList.remove('active');
+    textarea.value = '';
+}
+
+// 提交评论回复
+async function submitCommentReply(commentId, replyToAuthor, momentId) {
+    try {
+        const userProfile = await getUserProfile();
+        const userName = userProfile.name || '我';
+        
+        const replyContainer = document.getElementById(`${commentId}-reply`);
+        const textarea = replyContainer.querySelector('.moment-reply-input');
+        const content = textarea.value.trim();
+        
+        if (!content) {
+            showToast('请输入回复内容');
+            return;
+        }
+        
+        const momentIndex = moments.findIndex(m => m.id === momentId);
+        if (momentIndex === -1) return;
+        
+        const moment = moments[momentIndex];
+        
+        // 添加用户回复
+        const newComment = {
+            author: userName,
+            content: `回复${replyToAuthor}: ${content}`,
+            like: false,
+            timestamp: new Date().toISOString()
+        };
+        
+        if (!moment.comments) {
+            moment.comments = [];
+        }
+        
+        moment.comments.push(newComment);
+        
+        // 保存并重新渲染
+        await saveDataToDB();
+        await renderMomentsList();
+        
+        showToast('回复成功');
+        
+        // 触发被回复人的回复
+        setTimeout(() => {
+            generateCommentReply(momentId, replyToAuthor, userName, content);
+        }, 1000);
+        
+    } catch (error) {
+        console.error('回复失败:', error);
+        showToast('回复失败');
+    }
+}
+
+// 点击评论作者头像
+function handleCommentAuthorClick(authorName) {
+    // 复用朋友圈头像点击逻辑
+    handleMomentAvatarClick(authorName);
+}
+
+// 显示朋友圈评论回复框（发现页面点击评论行）
+function showMomentReplyToComment(momentId, commentAuthor) {
+    // 显示回复框
+    showMomentComment(momentId);
+    
+    // 预填充@用户名
+    const replyInput = document.querySelector(`#momentMainReply-${momentId} .moment-reply-input`);
+    if (replyInput) {
+        const mention = `@${commentAuthor} `;
+        const currentText = replyInput.value;
+        
+        // 避免重复添加@提及
+        if (!currentText.includes(mention)) {
+            replyInput.value = mention + currentText;
+        }
+        
+        // 聚焦输入框并设置光标位置
+        replyInput.focus();
+        replyInput.setSelectionRange(replyInput.value.length, replyInput.value.length);
+        
+        // 确保回复框滚动到可见位置
+        setTimeout(() => {
+            replyInput.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+    }
+}
+
+// 生成楼主回复用户评论
+async function generateMomentAuthorReply(momentId, commenterName, commentContent) {
+    try {
+        const momentIndex = moments.findIndex(m => m.id === momentId);
+        if (momentIndex === -1) return;
+        
+        const moment = moments[momentIndex];
+        const authorName = moment.authorName;
+        
+        // 如果楼主就是用户，不生成回复
+        const userProfile = await getUserProfile();
+        if (authorName === userProfile.name) return;
+        
+        // 查找角色
+        const character = window.contacts?.find(c => c.name === authorName);
+        if (!character) return;
+        
+        // 生成回复内容
+        const replyContent = await generateCharacterReply(character, commenterName, commentContent, moment.content);
+        
+        // 添加角色回复
+        const authorReply = {
+            author: authorName,
+            content: `回复${commenterName}: ${replyContent}`,
+            like: false,
+            timestamp: new Date().toISOString()
+        };
+        
+        moments[momentIndex].comments.push(authorReply);
+        
+        // 保存并重新渲染
+        await saveDataToDB();
+        await renderMomentsList();
+        
+    } catch (error) {
+        console.error('生成楼主回复失败:', error);
+    }
+}
+
+// 生成被回复人的回复
+async function generateCommentReply(momentId, repliedAuthor, replierName, replyContent) {
+    try {
+        const momentIndex = moments.findIndex(m => m.id === momentId);
+        if (momentIndex === -1) return;
+        
+        const moment = moments[momentIndex];
+        
+        // 如果被回复的是用户，不生成回复
+        const userProfile = await getUserProfile();
+        if (repliedAuthor === userProfile.name) return;
+        
+        // 查找被回复的角色
+        const character = window.contacts?.find(c => c.name === repliedAuthor);
+        if (!character) return;
+        
+        // 生成回复内容
+        const responseContent = await generateCharacterReply(character, replierName, replyContent, moment.content);
+        
+        // 添加角色回复
+        const characterReply = {
+            author: repliedAuthor,
+            content: responseContent,
+            like: false,
+            timestamp: new Date().toISOString()
+        };
+        
+        moments[momentIndex].comments.push(characterReply);
+        
+        // 保存并重新渲染
+        await saveDataToDB();
+        await renderMomentsList();
+        
+    } catch (error) {
+        console.error('生成角色回复失败:', error);
+    }
+}
+
+// 生成角色回复内容
+async function generateCharacterReply(character, replierName, replyContent, momentContent) {
+    try {
+        const userProfile = await getUserProfile();
+        
+        const prompt = window.promptBuilder.buildMomentReplyPrompt(character, replierName, replyContent, momentContent);
+
+        const response = await fetch(apiSettings.url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiSettings.key}`
+            },
+            body: JSON.stringify({
+                model: apiSettings.model,
+                messages: [
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0.8,
+                max_tokens: 5000
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`API请求失败: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        return data.choices[0]?.message?.content?.trim() || '哈哈哈';
+        
+    } catch (error) {
+        console.error('生成角色回复失败:', error);
+        return '😄';
+    }
+}
+
+async function handleMomentAvatarClick(authorName) {
+    try {
+        // 获取用户配置
+        const userProfile = await getUserProfile();
+        
+        // 如果是自己，显示自己的主页
+        if (authorName === '我' || authorName === userProfile.name) {
+            await showUserProfile();
+            return;
+        }
+        
+        // 查找对应的联系人
+        const contact = window.contacts?.find(c => c.name === authorName);
+        if (contact) {
+            await showContactProfile(contact);
+        } else {
+            console.error('联系人不存在 - 详细信息:');
+            console.error('- 查找的联系人姓名:', authorName);
+            console.error('- 当前联系人列表:', window.contacts);
+            console.error('- 联系人列表长度:', window.contacts ? window.contacts.length : '联系人列表为空');
+            if (window.contacts && window.contacts.length > 0) {
+                console.error('- 现有联系人姓名列表:', window.contacts.map(c => c.name));
+            }
+            
+            // 显示错误提示
+            showToast(`联系人不存在: ${authorName}`);
+            
+            // 仍然创建临时联系人对象用于显示，但标记为不存在
+            const tempContact = {
+                name: `${authorName} (联系人不存在)`,
+                avatar: null,
+                isTemporary: true
+            };
+            await showContactProfile(tempContact);
+        }
+    } catch (error) {
+        console.error('处理头像点击事件失败:', error);
+    }
+}
+
+// 创建个人主页朋友圈动态元素
+async function createUserProfileMomentElement(moment) {
+    const momentDiv = document.createElement('div');
+    momentDiv.className = 'user-profile-moment-item';
+    
+    // 获取当前用户资料用于头像显示
+    const userProfile = await getUserProfile();
+    
+    let imagesHtml = '';
+    
+    // 处理图片 - 支持新的文件系统和旧的base64格式
+    if (moment.imageFileIds && moment.imageCount > 0 && window.ImageStorageAPI) {
+        // 新的文件系统存储方式
+        const imageUrls = [];
+        for (let i = 0; i < moment.imageCount; i++) {
+            imageUrls.push(`data:image/jpeg;base64,loading...`); // 占位符，后续异步加载
+        }
+        imagesHtml = `
+            <div class="user-profile-moment-images">
+                ${imageUrls.map((image, index) => `
+                    <img src="${image}" alt="朋友圈图片" class="user-profile-moment-image" data-moment-id="${moment.id}" data-image-index="${index}">
+                `).join('')}
+            </div>
+        `;
+    } else if (moment.image) {
+        // 旧的单图片格式
+        imagesHtml = `
+            <div class="user-profile-moment-images">
+                <img src="${moment.image}" alt="朋友圈图片" class="user-profile-moment-image" onclick="showImagePreview('${moment.image}')">
+            </div>
+        `;
+    } else if (moment.images && moment.images.length > 0) {
+        // 多图片格式
+        imagesHtml = `
+            <div class="user-profile-moment-images">
+                ${moment.images.map(image => `
+                    <img src="${image}" alt="朋友圈图片" class="user-profile-moment-image" onclick="showImagePreview('${image}')">
+                `).join('')}
+            </div>
+        `;
+    }
+    
+    // 使用正确的时间字段
+    const timeStr = moment.time || moment.timestamp || new Date().toISOString();
+    
+    // 处理点赞信息
+    const likes = moment.likes || [];
+    let likedUsers = [];
+    
+    // 获取点赞用户列表（包括独立点赞和评论点赞）
+    if (likes.length > 0) {
+        likedUsers = [...likes];
+    }
+    
+    if (moment.comments && moment.comments.length > 0) {
+        const commentLikedUsers = moment.comments
+            .filter(comment => comment.like === true)
+            .map(comment => comment.author)
+            .filter(author => !likedUsers.includes(author)); // 避免重复
+        
+        likedUsers = [...likedUsers, ...commentLikedUsers];
+    }
+    
+    const likesContent = likedUsers.length > 0 ? 
+        `<div class="moment-likes">❤️ ${likedUsers.join(', ')}</div>` : '';
+    
+    // 处理评论内容 - 个人主页使用完整交互样式
+    let commentsContent = '';
+    if (moment.comments && moment.comments.length > 0) {
+        const commentsList = moment.comments
+            .filter(comment => comment.content && comment.content.trim())
+            .map((comment, index) => {
+                const safeContent = comment.content.replace(/'/g, '&#39;');
+                const commentTimeStr = comment.time || new Date().toISOString();
+                const isLiked = comment.like === true ? 'liked' : '';
+                
+                const commentAuthorContact = contacts.find(c => c.name === comment.author);
+                const commentAvatarContent = commentAuthorContact && commentAuthorContact.avatar ? 
+                    `<img src="${commentAuthorContact.avatar}" alt="头像" style="width: 32px; height: 32px; border-radius: 4px; object-fit: cover;">` : 
+                    `<div style="width: 32px; height: 32px; border-radius: 4px; background: #ddd; display: flex; align-items: center; justify-content: center; font-size: 14px;">${comment.author.charAt(0)}</div>`;
+                
+                return `
+                    <div class="profile-moment-comment-item" data-comment-index="${index}" style="display: flex; margin-bottom: 12px;">
+                        <div style="margin-right: 10px;">${commentAvatarContent}</div>
+                        <div style="flex: 1;">
+                            <div class="profile-moment-comment-author" onclick="handleCommentAuthorClick('${comment.author}')" style="font-weight: 600; color: #576b95; cursor: pointer; line-height: 16px;">${comment.author}</div>
+                            <div class="profile-moment-comment-text">${safeContent}</div>
+                            <div class="profile-moment-comment-actions" style="margin-top: 4px; font-size: 12px; color: #999;">
+                                <span class="profile-moment-comment-time">${formatContactListTime(commentTimeStr)}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        commentsContent = `<div class="profile-moment-comments">${commentsList}</div>`;
+    }
+    
+    // 个人主页使用独立按钮
+    const actionsMenu = `
+        <div style="display: flex; gap: 8px;">
+            <button onclick="likeMoment('${moment.id}')" style="padding: 4px 8px; background: #f0f0f0; border: none; border-radius: 12px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 4px;" title="点赞">
+                ❤ 点赞
+            </button>
+            <button onclick="showMomentComment('${moment.id}')" style="padding: 4px 8px; background: #f0f0f0; border: none; border-radius: 12px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 4px;" title="评论">
+                💬 评论
+            </button>
+        </div>
+    `;
+    
+    // 处理作者头像 - 支持新的文件系统格式
+    let avatarContent = '';
+    const author = window.contacts ? window.contacts.find(c => c.name === moment.authorName) : null;
+    
+    try {
+        if (author) {
+            // 使用getAvatarHTML获取联系人头像
+            const avatarHTML = await getAvatarHTML(author, 'contact', '');
+            if (avatarHTML.includes('<img')) {
+                const srcMatch = avatarHTML.match(/src="([^"]+)"/);
+                if (srcMatch) {
+                    avatarContent = `<img src="${srcMatch[1]}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+                }
+            }
+        } else if (moment.authorName === userProfile.name) {
+            // 如果是当前用户的动态，使用getAvatarHTML获取用户头像
+            const avatarHTML = await getAvatarHTML(userProfile, 'user', '');
+            if (avatarHTML.includes('<img')) {
+                const srcMatch = avatarHTML.match(/src="([^"]+)"/);
+                if (srcMatch) {
+                    avatarContent = `<img src="${srcMatch[1]}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+                }
+            }
+        }
+        
+        // 如果没有头像或头像获取失败，使用文字头像
+        if (!avatarContent) {
+            avatarContent = `<div style="width: 40px; height: 40px; border-radius: 6px; background: #ddd; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #333;">${moment.authorName.charAt(0)}</div>`;
+        }
+    } catch (error) {
+        console.warn('获取个人主页朋友圈头像失败，使用回退逻辑:', error);
+        // 回退到旧的逻辑
+        if (author && author.avatar) {
+            avatarContent = `<img src="${author.avatar}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+        } else if (moment.authorName === userProfile.name && userProfile.avatar) {
+            avatarContent = `<img src="${userProfile.avatar}" alt="头像" style="width: 40px; height: 40px; border-radius: 6px; object-fit: cover;">`;
+        } else {
+            avatarContent = `<div style="width: 40px; height: 40px; border-radius: 6px; background: #ddd; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #333;">${moment.authorName.charAt(0)}</div>`;
+        }
+    }
+    
+    momentDiv.innerHTML = `
+        <div class="moment-header" style="display: flex; margin-bottom: 8px; align-items: flex-start;">
+            <div class="moment-avatar" style="margin-right: 12px; flex-shrink: 0;">${avatarContent}</div>
+            <div class="moment-info" style="flex: 1; display: flex; flex-direction: column; justify-content: space-between; min-height: 40px;">
+                <div class="moment-name" style="font-weight: 600; color: #576b95; font-size: 15px; line-height: 1.2; margin: 0;">${moment.authorName}</div>
+                <div class="user-profile-moment-content">${moment.content}</div>
+            </div>
+        </div>
+        ${imagesHtml}
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+            <div class="user-profile-moment-time" style="font-size: 12px; color: #999;">${formatContactListTime(timeStr)}</div>
+            ${actionsMenu}
+        </div>
+        ${likesContent}
+        ${commentsContent}
+        <div class="moment-reply-input-container" id="momentMainReply-${moment.id}" style="display: none;">
+            <textarea class="moment-reply-input" placeholder="写评论..."></textarea>
+            <div class="moment-reply-actions">
+                <button class="moment-reply-btn moment-reply-cancel" onclick="hideMomentComment('${moment.id}')">取消</button>
+                <button class="moment-reply-btn moment-reply-submit" onclick="submitMomentComment('${moment.id}')">发送</button>
+            </div>
+        </div>
+    `;
+    
+    // 异步加载文件系统中的图片
+    if (moment.imageFileIds && moment.imageCount > 0 && window.ImageStorageAPI) {
+        setTimeout(async () => {
+            try {
+                await window.ImageStorageAPI.init();
+                const imageUrls = await window.ImageStorageAPI.getMomentImagesURLs(moment.id, moment.imageCount);
+                const imgElements = momentDiv.querySelectorAll('[data-moment-id="' + moment.id + '"]');
+                imgElements.forEach((img, index) => {
+                    if (imageUrls[index]) {
+                        img.src = imageUrls[index];
+                        img.onclick = () => showImagePreview(imageUrls[index]);
+                    }
+                });
+            } catch (error) {
+                console.error('加载个人主页朋友圈图片失败:', error);
+            }
+        }, 100);
+    }
+    
+    return momentDiv;
+}
+
+// 页面加载后自动检查迁移状态 - 延迟至数据库初始化完成后
+document.addEventListener('DOMContentLoaded', () => {
+    // 等待数据库完全初始化后再检查迁移状态
+    const checkMigrationWhenReady = async () => {
+        // 等待数据库就绪
+        let attempts = 0;
+        while ((!window.db || !window.isIndexedDBReady) && attempts < 30) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            attempts++;
+        }
+        
+        if (!window.db) {
+            console.warn('数据库初始化超时，跳过迁移检查');
+            return;
+        }
+        
+        // 数据库就绪后执行迁移检查
+        if (window.ImageMigrationManager && document.getElementById('migrationStatusText')) {
+            try {
+                await checkImageMigrationStatus();
+            } catch (error) {
+                console.error('检查图片迁移状态失败:', error);
+            }
+        }
+        
+        // 检查聊天表情迁移状态
+        if (window.ChatEmojiMigrationManager && document.getElementById('chatEmojiMigrationStatusText')) {
+            try {
+                await checkChatEmojiMigrationStatus();
+            } catch (error) {
+                console.error('检查聊天表情迁移状态失败:', error);
+            }
+        }
+    };
+    
+    // 异步执行，不阻塞其他初始化
+    checkMigrationWhenReady().catch(console.error);
+});
+
+// === Banner上传功能 ===
+
+// 全局变量用于存储当前选择的图片
+let currentBannerImage = null;
+let currentBannerCanvas = null;
+
+// 打开banner上传模态框
+function openBannerUploadModal() {
+    
+    // 检查模态框元素是否存在
+    const modal = document.getElementById('bannerUploadModal');
+    if (!modal) {
+        console.error('Banner上传模态框元素不存在');
+        showToast('无法打开上传界面，请刷新页面重试');
+        return;
+    }
+    
+    console.log('找到模态框元素，准备显示');
+    showModal('bannerUploadModal');
+    resetBannerUpload();
+}
+
+// 触发文件选择
+function triggerBannerFileInput() {
+    document.getElementById('bannerFileInput').click();
+}
+
+// 处理文件选择
+async function handleBannerFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    // 验证文件类型
+    if (!file.type.match(/^image\/(jpeg|jpg|png)$/)) {
+        showToast('请选择 JPG 或 PNG 格式的图片');
+        return;
+    }
+    
+    // 验证文件大小（限制为 10MB）
+    if (file.size > 10 * 1024 * 1024) {
+        showToast('图片文件不能超过 10MB');
+        return;
+    }
+    
+    try {
+        // 读取图片
+        const imageUrl = await readFileAsDataURL(file);
+        const img = new Image();
+        
+        img.onload = () => {
+            currentBannerImage = img;
+            setupBannerPreview();
+        };
+        
+        img.onerror = () => {
+            showToast('图片加载失败，请选择其他图片');
+        };
+        
+        img.src = imageUrl;
+        
+    } catch (error) {
+        console.error('图片处理失败:', error);
+        showToast('图片处理失败: ' + error.message);
+    }
+}
+
+// 设置banner预览
+function setupBannerPreview() {
+    if (!currentBannerImage) return;
+    
+    // 显示预览容器
+    const uploadArea = document.getElementById('bannerUploadArea');
+    const previewContainer = document.getElementById('bannerPreviewContainer');
+    
+    uploadArea.style.display = 'none';
+    previewContainer.style.display = 'block';
+    
+    // 设置canvas和slider
+    currentBannerCanvas = document.getElementById('bannerPreviewCanvas');
+    const slider = document.getElementById('bannerCropSlider');
+    
+    // 重置slider
+    slider.value = 50;
+    
+    // 初始渲染
+    updateBannerPreview();
+}
+
+// 更新banner预览
+function updateBannerPreview() {
+    if (!currentBannerImage || !currentBannerCanvas) return;
+    
+    const canvas = currentBannerCanvas;
+    const ctx = canvas.getContext('2d');
+    const slider = document.getElementById('bannerCropSlider');
+    
+    // Canvas尺寸 (保持2.5:1的banner比例)
+    const canvasWidth = 400;
+    const canvasHeight = 160;
+    
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    
+    // 计算图片尺寸和位置
+    const imgWidth = currentBannerImage.width;
+    const imgHeight = currentBannerImage.height;
+    
+    // 计算缩放比例，确保图片宽度完全覆盖canvas
+    const scaleX = canvasWidth / imgWidth;
+    const scaleY = canvasHeight / imgHeight;
+    const scale = Math.max(scaleX, scaleY);
+    
+    const scaledWidth = imgWidth * scale;
+    const scaledHeight = imgHeight * scale;
+    
+    // 根据slider值计算垂直位置
+    const cropOffset = (slider.value / 100) * (scaledHeight - canvasHeight);
+    
+    // 清空canvas并绘制图片
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    ctx.drawImage(
+        currentBannerImage,
+        (canvasWidth - scaledWidth) / 2, // 水平居中
+        -cropOffset, // 根据slider调整垂直位置
+        scaledWidth,
+        scaledHeight
+    );
+}
+
+// 重置banner上传
+function resetBannerUpload() {
+    currentBannerImage = null;
+    currentBannerCanvas = null;
+    
+    const uploadArea = document.getElementById('bannerUploadArea');
+    const previewContainer = document.getElementById('bannerPreviewContainer');
+    const fileInput = document.getElementById('bannerFileInput');
+    
+    if (uploadArea) {
+        uploadArea.style.display = 'block';
+    } else {
+        console.error('上传区域元素不存在');
+    }
+    
+    if (previewContainer) {
+        previewContainer.style.display = 'none';
+    } else {
+        console.error('预览容器元素不存在');
+    }
+    
+    if (fileInput) {
+        fileInput.value = '';
+    } else {
+        console.error('文件输入元素不存在');
+    }
+}
+
+// 保存banner图片
+async function saveBannerImage() {
+    if (!currentBannerCanvas || !window.ImageStorageAPI) {
+        showToast('无法保存图片，请重试');
+        return;
+    }
+    
+    try {
+        // 将canvas转换为blob
+        const blob = await canvasToBlob(currentBannerCanvas);
+        
+        // 确保 ImageStorageAPI 已初始化
+        await window.ImageStorageAPI.init();
+        
+        // 存储banner图片
+        const fileId = await window.ImageStorageAPI.storeBanner(blob, 'user_profile');
+        console.log('Banner图片已保存，文件ID:', fileId);
+        
+        // 更新用户资料中的banner字段
+        const profile = await getUserProfile();
+        profile.bannerFileId = fileId; // 这里fileId现在应该是字符串了
+        await saveDataToDB(); // 保存到IndexedDB
+        
+        // 应用新的banner背景
+        await applyBannerBackground(fileId);
+        
+        // 关闭模态框
+        closeModal('bannerUploadModal');
+        showToast('背景图片已更新');
+        
+        // 尝试重新加载banner
+        setTimeout(() => {
+            loadUserBanner();
+        }, 1000);
+        
+    } catch (error) {
+        console.error('保存banner失败:', error);
+        showToast('保存失败: ' + error.message);
+    }
+}
+
+// 应用banner背景
+async function applyBannerBackground(fileId) {
+    try {
+        
+        if (!window.ImageStorageAPI) {
+            console.error('ImageStorageAPI 未加载');
+            return;
+        }
+        
+        await window.ImageStorageAPI.init();
+        const bannerUrl = await window.ImageStorageAPI.getBannerURL('user_profile');
+        
+        const bannerElement = document.getElementById('userProfileBanner');
+        
+        // 尝试其他方式查找元素
+        const allBanners = document.querySelectorAll('.user-profile-banner');
+        
+        if (bannerUrl && bannerElement) {
+            // 清除原有的渐变背景
+            bannerElement.style.background = 'none';
+            bannerElement.style.backgroundImage = `url(${bannerUrl})`;
+            bannerElement.style.backgroundSize = 'cover';
+            bannerElement.style.backgroundPosition = 'center';
+            bannerElement.style.backgroundRepeat = 'no-repeat';
+        } else {
+            console.error('Banner URL或元素为空:', { bannerUrl, bannerElement });
+        }
+    } catch (error) {
+        console.error('应用banner背景失败:', error);
+    }
+}
+
+// 加载用户banner背景
+async function loadUserBanner() {
+    try {
+        const userProfile = await getUserProfile();
+        console.log('用户资料:', userProfile);
+        
+        if (userProfile.bannerFileId && window.ImageStorageAPI) {
+            await applyBannerBackground(userProfile.bannerFileId);
+        } else {
+        }
+    } catch (error) {
+        console.error('加载用户banner失败:', error);
+    }
+}
+
+// 工具函数：读取文件为DataURL
+// readFileAsDataURL function moved to utils/formatUtils.js
+
+// 工具函数：Canvas转Blob
+// canvasToBlob function moved to utils/formatUtils.js
+
+// 在显示个人主页时加载banner
+const originalShowUserProfile = showUserProfile;
+showUserProfile = async function() {
+    if (originalShowUserProfile) {
+        await originalShowUserProfile();
+    }
+    // 加载banner背景
+    setTimeout(loadUserBanner, 100);
 };
 
-window.lastTriggeredMemoryFactsDebug = lastTriggeredMemoryFactsDebug;
+// ========== 主题色管理功能 ==========
 
-function setLastTriggeredMemoryFactsDebug(contact, queryText, facts) {
-    lastTriggeredMemoryFactsDebug = {
-        contactId: contact?.id || null,
-        contactName: contact?.name || '',
-        queryText: String(queryText || ''),
-        triggeredAt: Date.now(),
-        facts: Array.isArray(facts) ? facts : []
+// 默认主题色配置
+const defaultThemeColors = [
+    { color: '#07c160', name: '鲜绿' },
+    { color: '#1890ff', name: '天空蓝' },
+    { color: '#722ed1', name: '深紫' },
+    { color: '#f5222d', name: '火红' },
+    { color: '#fa8c16', name: '橙' },
+    { color: '#13c2c2', name: '清新青' },
+    { color: '#eb2f96', name: '亮粉' },
+    { color: '#2f54eb', name: '海蓝' }
+];
+
+// 默认渐变配置
+const defaultGradientConfig = {
+    enabled: false,
+    primaryColor: '#07c160',
+    secondaryColor: '#1890ff',
+    direction: 'to right'
+};
+
+// IndexedDB 主题配置管理器
+class ThemeConfigManager {
+    constructor() {
+        this.dbName = 'WhaleLLTDB';
+        this.db = null;
+        this.storeName = 'themeConfig';
+    }
+
+    async init() {
+        // 使用已有的数据库连接
+        if (window.db && window.isIndexedDBReady) {
+            this.db = window.db;
+            return this.db;
+        }
+        
+        // 等待数据库就绪
+        return this.waitForDatabase();
+    }
+
+    async waitForDatabase() {
+        return new Promise((resolve) => {
+            const checkInterval = setInterval(() => {
+                if (window.db && window.isIndexedDBReady) {
+                    this.db = window.db;
+                    clearInterval(checkInterval);
+                    resolve(this.db);
+                }
+            }, 100);
+        });
+    }
+
+
+    async saveThemeConfig(type, data) {
+        try {
+            await this.init();
+            
+            // 检查存储是否存在
+            if (!this.db.objectStoreNames.contains(this.storeName)) {
+                console.warn('themeConfig存储不存在，无法保存配置');
+                throw new Error('themeConfig存储不存在');
+            }
+            
+            return new Promise((resolve, reject) => {
+                const transaction = this.db.transaction([this.storeName], 'readwrite');
+                const store = transaction.objectStore(this.storeName);
+                
+                const config = {
+                    type: type,
+                    data: data,
+                    updatedAt: new Date().toISOString()
+                };
+                
+                const request = store.put(config);
+                
+                request.onsuccess = () => {
+                    console.log(`主题配置已保存到IndexedDB (${type}):`, data);
+                    resolve(true);
+                };
+                
+                request.onerror = () => {
+                    console.error('保存主题配置失败:', request.error);
+                    reject(request.error);
+                };
+            });
+        } catch (error) {
+            console.error('保存主题配置时出错:', error);
+            return false;
+        }
+    }
+
+    async getThemeConfig(type) {
+        try {
+            await this.init();
+            
+            // 检查存储是否存在
+            if (!this.db.objectStoreNames.contains(this.storeName)) {
+                console.warn('themeConfig存储不存在，返回null');
+                return null;
+            }
+            
+            return new Promise((resolve, reject) => {
+                const transaction = this.db.transaction([this.storeName], 'readonly');
+                const store = transaction.objectStore(this.storeName);
+                const request = store.get(type);
+                
+                request.onsuccess = () => {
+                    const result = request.result;
+                    resolve(result ? result.data : null);
+                };
+                
+                request.onerror = () => {
+                    console.error('获取主题配置失败:', request.error);
+                    resolve(null);
+                };
+            });
+        } catch (error) {
+            console.error('获取主题配置时出错:', error);
+            return null;
+        }
+    }
+
+    async getAllThemeConfigs() {
+        try {
+            await this.init();
+            
+            // 检查存储是否存在
+            if (!this.db.objectStoreNames.contains(this.storeName)) {
+                console.warn('themeConfig存储不存在，返回空配置');
+                return {};
+            }
+            
+            return new Promise((resolve, reject) => {
+                const transaction = this.db.transaction([this.storeName], 'readonly');
+                const store = transaction.objectStore(this.storeName);
+                const request = store.getAll();
+                
+                request.onsuccess = () => {
+                    const configs = {};
+                    request.result.forEach(item => {
+                        configs[item.type] = item.data;
+                    });
+                    resolve(configs);
+                };
+                
+                request.onerror = () => {
+                    console.error('获取所有主题配置失败:', request.error);
+                    resolve({});
+                };
+            });
+        } catch (error) {
+            console.error('获取所有主题配置时出错:', error);
+            return {};
+        }
+    }
+
+    async ensureDefaultConfigs() {
+        try {
+            await this.init();
+            
+            // 检查themeConfig存储是否存在
+            if (!this.db.objectStoreNames.contains(this.storeName)) {
+                console.log('themeConfig存储不存在，需要数据库升级');
+                // 返回false表示存储不存在，让调用者决定如何处理
+                return { success: false, reason: 'storage_not_exists' };
+            }
+            
+            const configs = await this.getAllThemeConfigs();
+            let hasChanges = false;
+            
+            // 如果没有主题配置，创建默认配置
+            if (!configs.theme) {
+                await this.saveThemeConfig('theme', { color: '#07c160', name: '鲜绿' });
+                console.log('已创建默认主题配置');
+                hasChanges = true;
+            }
+            
+            if (!configs.gradient) {
+                await this.saveThemeConfig('gradient', defaultGradientConfig);
+                console.log('已创建默认渐变配置');
+                hasChanges = true;
+            }
+            
+            // 如果从旧格式localStorage迁移数据
+            const migrationResult = this.migrateFromOldLocalStorage();
+            if (migrationResult && Object.keys(configs).length === 0) {
+                await this.saveThemeConfig('theme', migrationResult.theme);
+                await this.saveThemeConfig('gradient', migrationResult.gradient);
+                console.log('已从localStorage迁移主题配置到IndexedDB');
+                hasChanges = true;
+            }
+            
+            if (hasChanges) {
+                console.log('主题配置初始化完成');
+            }
+            
+            return true;
+        } catch (error) {
+            console.error('确保默认配置时出错:', error);
+            return false;
+        }
+    }
+
+
+    // 从旧格式localStorage迁移数据（同步方法）
+    migrateFromOldLocalStorage() {
+        try {
+            const savedTheme = localStorage.getItem('user-theme-color');
+            const savedGradient = localStorage.getItem('user-gradient-config');
+            
+            if (!savedTheme && !savedGradient) {
+                return null;
+            }
+            
+            let themeData = { color: '#07c160', name: '鲜绿' };
+            let gradientData = defaultGradientConfig;
+            
+            if (savedTheme) {
+                themeData = JSON.parse(savedTheme);
+                console.log('检测到旧格式主题配置:', themeData);
+                // 迁移后清理旧数据
+                localStorage.removeItem('user-theme-color');
+            }
+            
+            if (savedGradient) {
+                gradientData = JSON.parse(savedGradient);
+                console.log('检测到旧格式渐变配置:', gradientData);
+                // 迁移后清理旧数据
+                localStorage.removeItem('user-gradient-config');
+            }
+            
+            return { theme: themeData, gradient: gradientData };
+        } catch (error) {
+            console.error('迁移旧格式配置失败:', error);
+            return null;
+        }
+    }
+}
+
+// 创建全局主题配置管理器实例
+const themeConfigManager = new ThemeConfigManager();
+
+// 通用的数据库存储安全检查函数
+// safeCreateTransaction function moved to utils/formatUtils.js
+
+
+
+
+// 从IndexedDB加载保存的主题配置
+async function loadThemeConfig() {
+    try {
+        // 确保默认配置存在（包含从localStorage的自动迁移）
+        await themeConfigManager.ensureDefaultConfigs();
+        
+        // 从IndexedDB加载配置
+        const configs = await themeConfigManager.getAllThemeConfigs();
+        
+        let themeData = configs.theme || { color: '#07c160', name: '鲜绿' };
+        let gradientData = configs.gradient || defaultGradientConfig;
+        
+        // 应用主题配置
+        if (gradientData.enabled) {
+            applyGradientTheme(gradientData.primaryColor, gradientData.secondaryColor, gradientData.direction);
+        } else {
+            applyThemeColor(themeData.color);
+        }
+        
+        return { theme: themeData, gradient: gradientData };
+    } catch (error) {
+        console.error('加载主题配置失败:', error);
+        // 使用默认配置
+        const themeData = { color: '#07c160', name: '鲜绿' };
+        const gradientData = defaultGradientConfig;
+        applyThemeColor(themeData.color);
+        return { theme: themeData, gradient: gradientData };
+    }
+}
+
+
+
+// 兼容旧的函数名
+function loadThemeColor() {
+    return loadThemeConfig().then(config => config.theme);
+}
+
+// 应用主题色到页面
+// applyThemeColor function moved to utils/colorUtils.js
+
+// 应用渐变主题
+// applyGradientTheme function moved to utils/colorUtils.js
+
+// 保存主题色到IndexedDB
+async function saveThemeColor(color, name) {
+    try {
+        const themeData = { color, name };
+        
+        await themeConfigManager.saveThemeConfig('theme', themeData);
+        
+        // 禁用渐变模式
+        const gradientConfig = { ...defaultGradientConfig, enabled: false };
+        await themeConfigManager.saveThemeConfig('gradient', gradientConfig);
+        
+        console.log('主题色已保存:', themeData);
+    } catch (error) {
+        console.error('保存主题色失败:', error);
+    }
+}
+
+// 保存渐变配置到IndexedDB
+async function saveGradientConfig(primaryColor, secondaryColor, direction, enabled = true) {
+    try {
+        const gradientData = { 
+            enabled, 
+            primaryColor, 
+            secondaryColor, 
+            direction 
+        };
+        
+        await themeConfigManager.saveThemeConfig('gradient', gradientData);
+        console.log('渐变配置已保存:', gradientData);
+    } catch (error) {
+        console.error('保存渐变配置失败:', error);
+    }
+}
+
+// 初始化外观管理页面
+async function initAppearanceManagement() {
+    // 获取当前主题配置
+    const config = await loadThemeConfig();
+    const currentTheme = config.theme;
+    const currentGradient = config.gradient;
+    
+    // 设置主题色选项的点击事件
+    document.querySelectorAll('.theme-color-option').forEach(option => {
+        option.addEventListener('click', function() {
+            const color = this.getAttribute('data-color');
+            const name = this.getAttribute('data-name');
+            
+            // 移除其他选项的active状态
+            document.querySelectorAll('.theme-color-option').forEach(opt => {
+                opt.classList.remove('active');
+            });
+            
+            // 添加当前选项的active状态
+            this.classList.add('active');
+            
+            // 应用并保存主题色
+            applyThemeColor(color);
+            saveThemeColor(color, name);
+            
+            // 更新自定义颜色选择器
+            updateCustomColorInputs(color);
+            
+            // 禁用渐变开关
+            const gradientToggle = document.getElementById('gradientToggle');
+            if (gradientToggle) {
+                gradientToggle.checked = false;
+                toggleGradientSettings(false);
+            }
+            
+            // 显示提示
+            showToast(`已切换到${name}`);
+        });
+        
+        // 设置当前选中的主题色
+        if (option.getAttribute('data-color') === currentTheme.color && !currentGradient.enabled) {
+            option.classList.add('active');
+        }
+    });
+    
+    // 设置自定义颜色选择器
+    initCustomColorPicker(currentTheme.color);
+    
+    // 初始化渐变设置
+    initGradientSettings(currentGradient);
+}
+
+// 初始化自定义颜色选择器
+function initCustomColorPicker(initialColor) {
+    const colorPicker = document.getElementById('customColorPicker');
+    const colorText = document.getElementById('customColorText');
+    const colorPreview = document.getElementById('customColorPreview');
+    const applyBtn = document.querySelector('.apply-custom-color-btn');
+    
+    if (!colorPicker || !colorText || !colorPreview) return;
+    
+    // 设置初始值
+    colorPicker.value = initialColor;
+    colorText.value = initialColor.toUpperCase();
+    colorPreview.style.backgroundColor = initialColor;
+    
+    // 颜色选择器变化事件
+    colorPicker.addEventListener('input', function() {
+        const color = this.value.toUpperCase();
+        colorText.value = color;
+        colorPreview.style.backgroundColor = color;
+        validateColorInput(colorText, applyBtn);
+    });
+    
+    // 文本输入框变化事件
+    colorText.addEventListener('input', function() {
+        let color = this.value.trim();
+        
+        // 自动添加#前缀
+        if (color && !color.startsWith('#')) {
+            color = '#' + color;
+            this.value = color;
+        }
+        
+        // 验证颜色格式
+        if (isValidHexColor(color)) {
+            colorPicker.value = color;
+            colorPreview.style.backgroundColor = color;
+            this.classList.remove('invalid');
+        } else {
+            this.classList.add('invalid');
+        }
+        
+        validateColorInput(this, applyBtn);
+    });
+    
+    // 文本框失焦时格式化
+    colorText.addEventListener('blur', function() {
+        if (this.value && isValidHexColor(this.value)) {
+            this.value = this.value.toUpperCase();
+        }
+    });
+    
+    // 按回车键应用颜色
+    colorText.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter' && isValidHexColor(this.value)) {
+            applyCustomColor();
+        }
+    });
+    
+    // 点击预览圆圈触发颜色选择器
+    colorPreview.addEventListener('click', function() {
+        colorPicker.click();
+    });
+}
+
+// 更新自定义颜色输入框
+function updateCustomColorInputs(color) {
+    const colorPicker = document.getElementById('customColorPicker');
+    const colorText = document.getElementById('customColorText');
+    const colorPreview = document.getElementById('customColorPreview');
+    const applyBtn = document.querySelector('.apply-custom-color-btn');
+    
+    if (colorPicker) colorPicker.value = color;
+    if (colorText) {
+        colorText.value = color.toUpperCase();
+        colorText.classList.remove('invalid');
+    }
+    if (colorPreview) colorPreview.style.backgroundColor = color;
+    if (applyBtn) applyBtn.disabled = false;
+}
+
+// 验证颜色输入
+// validateColorInput function moved to utils/colorUtils.js
+
+// 应用自定义颜色
+function applyCustomColor() {
+    const colorText = document.getElementById('customColorText');
+    const color = colorText.value.trim();
+    
+    if (!color) {
+        showToast('请输入颜色代码');
+        return;
+    }
+    
+    if (!isValidHexColor(color)) {
+        showToast('请输入有效的颜色代码（例如：#FF0000）');
+        colorText.focus();
+        return;
+    }
+    
+    // 移除预设选项的active状态
+    document.querySelectorAll('.theme-color-option').forEach(opt => {
+        opt.classList.remove('active');
+    });
+    
+    // 应用并保存主题色
+    applyThemeColor(color);
+    saveThemeColor(color, '自定义颜色');
+    
+    // 更新预览
+    const colorPreview = document.getElementById('customColorPreview');
+    if (colorPreview) {
+        colorPreview.style.backgroundColor = color;
+    }
+    
+    showToast('自定义颜色已应用：' + color.toUpperCase());
+}
+
+// 工具函数：验证十六进制颜色代码
+
+// 初始化渐变设置
+function initGradientSettings(gradientConfig) {
+    const gradientToggle = document.getElementById('gradientToggle');
+    const gradientSettings = document.getElementById('gradientSettings');
+    
+    if (!gradientToggle) return;
+    
+    // 设置开关状态
+    gradientToggle.checked = gradientConfig.enabled;
+    toggleGradientSettings(gradientConfig.enabled);
+    
+    // 设置渐变开关事件
+    gradientToggle.addEventListener('change', function() {
+        toggleGradientSettings(this.checked);
+    });
+    
+    // 初始化渐变颜色选择器
+    initGradientColorPickers(gradientConfig);
+    
+    // 初始化渐变方向选择
+    initGradientDirectionPickers(gradientConfig.direction);
+}
+
+// 切换渐变设置显示/隐藏
+function toggleGradientSettings(show) {
+    const gradientSettings = document.getElementById('gradientSettings');
+    if (gradientSettings) {
+        gradientSettings.style.display = show ? 'block' : 'none';
+    }
+}
+
+// 初始化渐变颜色选择器
+function initGradientColorPickers(gradientConfig) {
+    // 主色选择器
+    initSingleGradientColorPicker('Primary', gradientConfig.primaryColor, updateGradientPreview);
+    // 副色选择器
+    initSingleGradientColorPicker('Secondary', gradientConfig.secondaryColor, updateGradientPreview);
+    
+    // 更新预览
+    updateGradientPreview();
+}
+
+// 初始化单个渐变颜色选择器
+function initSingleGradientColorPicker(type, initialColor, callback) {
+    const picker = document.getElementById(`gradient${type}Picker`);
+    const text = document.getElementById(`gradient${type}Text`);
+    const preview = document.getElementById(`gradient${type}Preview`);
+    
+    if (!picker || !text || !preview) return;
+    
+    // 设置初始值
+    picker.value = initialColor;
+    text.value = initialColor.toUpperCase();
+    preview.style.backgroundColor = initialColor;
+    
+    // 颜色选择器变化事件
+    picker.addEventListener('input', function() {
+        const color = this.value.toUpperCase();
+        text.value = color;
+        preview.style.backgroundColor = color;
+        if (callback) callback();
+    });
+    
+    // 文本输入框变化事件
+    text.addEventListener('input', function() {
+        let color = this.value.trim();
+        
+        if (color && !color.startsWith('#')) {
+            color = '#' + color;
+            this.value = color;
+        }
+        
+        if (isValidHexColor(color)) {
+            picker.value = color;
+            preview.style.backgroundColor = color;
+            this.classList.remove('invalid');
+            if (callback) callback();
+        } else {
+            this.classList.add('invalid');
+        }
+    });
+    
+    // 点击预览触发颜色选择器
+    preview.addEventListener('click', function() {
+        picker.click();
+    });
+}
+
+// 初始化渐变方向选择器
+function initGradientDirectionPickers(initialDirection) {
+    const directionInputs = document.querySelectorAll('input[name="gradientDirection"]');
+    
+    directionInputs.forEach(input => {
+        if (input.value === initialDirection) {
+            input.checked = true;
+        }
+        
+        input.addEventListener('change', function() {
+            if (this.checked) {
+                updateGradientPreview();
+            }
+        });
+    });
+}
+
+// 更新渐变预览
+function updateGradientPreview() {
+    const primaryColor = document.getElementById('gradientPrimaryText').value;
+    const secondaryColor = document.getElementById('gradientSecondaryText').value;
+    const direction = document.querySelector('input[name="gradientDirection"]:checked')?.value || 'to right';
+    
+    const previewDemo = document.getElementById('gradientPreviewDemo');
+    if (previewDemo && isValidHexColor(primaryColor) && isValidHexColor(secondaryColor)) {
+        previewDemo.style.background = `linear-gradient(${direction}, ${primaryColor}, ${secondaryColor})`;
+    }
+}
+
+// 应用渐变主题（从UI调用）
+function applyGradientThemeFromUI() {
+    const primaryColor = document.getElementById('gradientPrimaryText').value;
+    const secondaryColor = document.getElementById('gradientSecondaryText').value;
+    const direction = document.querySelector('input[name="gradientDirection"]:checked')?.value || 'to right';
+    
+    if (!isValidHexColor(primaryColor) || !isValidHexColor(secondaryColor)) {
+        showToast('请输入有效的颜色代码');
+        return;
+    }
+    
+    // 应用渐变
+    applyGradientTheme(primaryColor, secondaryColor, direction);
+    
+    // 保存配置
+    saveGradientConfig(primaryColor, secondaryColor, direction, true);
+    
+    // 移除预设主题色的选中状态
+    document.querySelectorAll('.theme-color-option').forEach(opt => {
+        opt.classList.remove('active');
+    });
+    
+    showToast('渐变主题已应用');
+}
+
+// 打开气泡设计器
+function openBubbleDesigner() {
+    try {
+        // 在新窗口中打开气泡设计器
+        const bubbleWindow = window.open('bubble.html', 'bubbleDesigner', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+        
+        if (!bubbleWindow) {
+            showToast('无法打开气泡设计器，请检查浏览器弹窗设置');
+            return;
+        }
+        
+        // 聚焦到新窗口
+        bubbleWindow.focus();
+        
+    } catch (error) {
+        console.error('打开气泡设计器时出错:', error);
+        showToast('打开气泡设计器失败，请重试');
+    }
+}
+
+// 在页面加载完成后初始化主题色
+document.addEventListener('DOMContentLoaded', async function() {
+    // 等待数据库完全初始化后再加载主题配置
+    const waitForDatabase = async () => {
+        let attempts = 0;
+        while ((!window.db || !window.isIndexedDBReady) && attempts < 30) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            attempts++;
+        }
+        
+        if (!window.db || !window.isIndexedDBReady) {
+            console.warn('数据库初始化超时，使用默认主题配置');
+            return false;
+        }
+        
+        // 再次检查themeConfig表是否存在
+        if (!window.db.objectStoreNames.contains('themeConfig')) {
+            console.warn('themeConfig存储不存在，等待数据库升级');
+            // 触发数据库升级
+            if (window.dbManager && window.dbManager.autoUpgradeDatabase) {
+                try {
+                    await window.dbManager.autoUpgradeDatabase();
+                    // 重新检查
+                    if (window.db && window.db.objectStoreNames.contains('themeConfig')) {
+                        console.log('数据库升级完成，themeConfig表已创建');
+                        return true;
+                    }
+                } catch (error) {
+                    console.error('数据库升级失败:', error);
+                }
+            }
+            return false;
+        }
+        
+        return true;
     };
-
-    window.lastTriggeredMemoryFactsDebug = lastTriggeredMemoryFactsDebug;
-
-    if (typeof renderLastTriggeredMemoryFactsPanel === 'function') {
-        renderLastTriggeredMemoryFactsPanel();
-    }
-}
-
-/**
- * 切换记忆面板中的标签页 (记忆表格 / 世界书 / 记忆条目)
- * @param {string} tabName - 'table' | 'worldbook' | 'facts'
- */
-function switchMemoryTab(tabName) {
-    const memoryView = document.getElementById('memoryTableViewWrapper');
-    const worldBookView = document.getElementById('worldBookViewWrapper');
-    const memoryFactsView = document.getElementById('memoryFactsViewWrapper');
-    const tabMemory = document.getElementById('tabMemoryTable');
-    const tabWorldBook = document.getElementById('tabWorldBook');
-    const tabMemoryFacts = document.getElementById('tabMemoryFacts');
-    const editBtn = document.getElementById('memoryEditBtn');
-
-    memoryView.style.display = 'none';
-    worldBookView.style.display = 'none';
-    if (memoryFactsView) {
-        memoryFactsView.style.display = 'none';
-    }
-
-    tabMemory.classList.remove('active');
-    tabWorldBook.classList.remove('active');
-    if (tabMemoryFacts) {
-        tabMemoryFacts.classList.remove('active');
-    }
-
-    if (tabName === 'table') {
-        memoryView.style.display = 'block';
-        tabMemory.classList.add('active');
-        editBtn.style.display = 'block';
-        return;
-    }
-
-    editBtn.style.display = 'none';
-
-    if (tabName === 'worldbook') {
-        worldBookView.style.display = 'flex';
-        tabWorldBook.classList.add('active');
-        renderWorldBookUI();
-        return;
-    }
-
-    if (tabName === 'facts') {
-        if (memoryFactsView) {
-            memoryFactsView.style.display = 'flex';
-        }
-        if (tabMemoryFacts) {
-            tabMemoryFacts.classList.add('active');
-        }
-        renderMemoryFactsUI(false);
-        renderLastTriggeredMemoryFactsPanel();
-        return;
-    }
-}
-
-/**
- * 渲染当前角色的世界书UI
- */
-function renderWorldBookUI() {
-    if (!currentContact) return;
-
-    const listContainer = document.getElementById('worldBookList');
-    listContainer.innerHTML = '';
-
-    const worldBook = currentContact.worldBook || [];
-
-    if (worldBook.length === 0) {
-        listContainer.innerHTML = '<p style="text-align:center; color:#999; padding:20px;">还没有条目，在下方添加一个吧！</p>';
+    
+    const databaseReady = await waitForDatabase();
+    
+    if (databaseReady) {
+        // 加载保存的主题配置
+        await loadThemeConfig();
+        
+        // 加载自定义气泡样式
+        await loadCustomBubbleStyle();
     } else {
-        worldBook.forEach((item, index) => {
-            const itemEl = document.createElement('div');
-            itemEl.className = 'world-book-item';
-            itemEl.innerHTML = `
-                <div class="world-book-item-header">
-                    <div class="world-book-item-keywords">${escapeHtml(item.keywords)}</div>
-                    <div class="world-book-item-actions">
-                        <button onclick="editWorldBookEntry(${index})">编辑</button>
-                        <button class="delete" onclick="deleteWorldBookEntry(${index})">删除</button>
-                    </div>
-                </div>
-                <div class="world-book-item-entry">${escapeHtml(item.entry)}</div>
+        // 如果数据库未就绪，应用默认主题
+        console.log('数据库未就绪，应用默认主题');
+        applyThemeColor('#07c160');
+    }
+    
+    // 当切换到外观管理页面时初始化
+    const originalShowPageAsync = showPageAsync;
+    window.showPageAsync = async function(pageIdToShow) {
+        const result = await originalShowPageAsync(pageIdToShow);
+        
+        if (pageIdToShow === 'appearanceManagementPage') {
+            setTimeout(async () => {
+                await initAppearanceManagement();
+            }, 100);
+        }
+        
+        return result;
+    };
+});
+
+// 监听来自气泡设计器的样式应用消息
+window.addEventListener('message', async function(event) {
+    // 检查消息类型
+    if (event.data && event.data.type === 'apply-bubble-style') {
+        try {
+            const bubbleStyleData = event.data.payload;
+            const bubbleType = event.data.bubbleType || 'kare'; // 默认为别人的气泡
+            
+            // 根据气泡类型存储到不同的键
+            const storageKey = bubbleType === 'self' ? 'bubbleStyleSelf' : 'bubbleStyle';
+            
+            // 存储气泡样式到 IndexedDB
+            saveBubbleStyleToStorage(bubbleStyleData, storageKey).then(() => {
+                console.log(`${bubbleType === 'self' ? '我的' : '对方的'}气泡样式已保存到存储`);
+                
+                // 如果当前在聊天页面，立即应用样式
+                if (document.getElementById('chatPage').classList.contains('active')) {
+                    applyBubbleStyleToCurrentChat();
+                }
+                
+                // 显示成功提示
+                if (typeof showToast === 'function') {
+                    showToast(`${bubbleType === 'self' ? '我的' : '对方的'}气泡样式已应用！`);
+                }
+            }).catch(error => {
+                console.error('保存气泡样式失败:', error);
+                if (typeof showToast === 'function') {
+                    showToast('样式保存失败: ' + error.message);
+                }
+            });
+            
+        } catch (error) {
+            console.error('处理气泡样式消息失败:', error);
+        }
+    } else if (event.data && event.data.type === 'reset-bubble-style') {
+        try {
+            // 恢复默认气泡样式
+            await resetBubbleStyleToDefault();
+            
+            // 显示成功提示
+            if (typeof showToast === 'function') {
+                showToast('已恢复默认气泡样式！');
+            }
+            
+        } catch (error) {
+            console.error('恢复默认气泡样式失败:', error);
+            if (typeof showToast === 'function') {
+                showToast('恢复默认样式失败: ' + error.message);
+            }
+        }
+    }
+});
+
+/**
+ * 处理HTML中的file:格式图片URL
+ */
+async function processFileUrlsInHtml(html) {
+    if (!html || typeof html !== 'string') return html;
+    
+    // 使用正则表达式查找所有 src="file:fileId" 格式的图片
+    const fileUrlRegex = /src="file:([^"]+)"/g;
+    let match;
+    const replacements = [];
+    
+    while ((match = fileUrlRegex.exec(html)) !== null) {
+        const fileId = match[1];
+        try {
+            // 使用 FileStorageManager 获取真实URL
+            if (window.FileStorageManager && window.FileStorageManager.createFileURL) {
+                const realUrl = await window.FileStorageManager.createFileURL(fileId);
+                replacements.push({
+                    original: match[0],
+                    replacement: `src="${realUrl}"`
+                });
+            }
+        } catch (error) {
+            console.warn('处理文件URL失败:', fileId, error);
+        }
+    }
+    
+    // 应用所有替换
+    let processedHtml = html;
+    for (const replacement of replacements) {
+        processedHtml = processedHtml.replace(replacement.original, replacement.replacement);
+    }
+    
+    return processedHtml;
+}
+
+/**
+ * 保存气泡样式到存储
+ */
+async function saveBubbleStyleToStorage(styleData, storageKey = 'bubbleStyle') {
+    try {
+        // 保存完整的气泡样式数据（包含所有配置）
+        const bubbleStyleConfig = {
+            ...styleData,  // 包含所有样式配置
+            enabled: true,  // 每次保存都自动启用
+            lastModified: new Date().toISOString()  // 添加时间戳以跟踪更新
+        };
+        
+        await themeConfigManager.saveThemeConfig(storageKey, bubbleStyleConfig);
+        console.log(`${storageKey}已保存到 themeConfig 并自动启用`);
+        
+    } catch (error) {
+        console.error(`保存${storageKey}失败:`, error);
+        throw error;
+    }
+}
+
+/**
+ * 应用气泡样式到当前聊天
+ */
+async function applyBubbleStyleToCurrentChat() {
+    try {
+        // 同时读取两种气泡样式
+        await themeConfigManager.init();
+        const bubbleStyleKare = await themeConfigManager.getThemeConfig('bubbleStyle');
+        const bubbleStyleSelf = await themeConfigManager.getThemeConfig('bubbleStyleSelf');
+        
+        // 如果通过 themeConfigManager 获取不到，直接从数据库读取
+        let directBubbleStyleKare = null;
+        let directBubbleStyleSelf = null;
+        
+        if (!bubbleStyleKare || !bubbleStyleSelf) {
+            const results = await new Promise((resolve) => {
+                const transaction = themeConfigManager.db.transaction(['themeConfig'], 'readonly');
+                const store = transaction.objectStore('themeConfig');
+                let kare = null, self = null, completed = 0;
+                
+                const checkComplete = () => {
+                    completed++;
+                    if (completed === 2) {
+                        resolve({ kare, self });
+                    }
+                };
+                
+                const requestKare = store.get('bubbleStyle');
+                requestKare.onsuccess = () => {
+                    kare = requestKare.result;
+                    checkComplete();
+                };
+                requestKare.onerror = () => checkComplete();
+                
+                const requestSelf = store.get('bubbleStyleSelf');
+                requestSelf.onsuccess = () => {
+                    self = requestSelf.result;
+                    checkComplete();
+                };
+                requestSelf.onerror = () => checkComplete();
+            });
+            
+            directBubbleStyleKare = results.kare;
+            directBubbleStyleSelf = results.self;
+        }
+        
+        // 使用找到的数据
+        const styleDataKare = bubbleStyleKare || directBubbleStyleKare;
+        const styleDataSelf = bubbleStyleSelf || directBubbleStyleSelf;
+        
+        // 处理别人的气泡样式
+        const isEnabledKare = styleDataKare?.enabled || styleDataKare?.data?.enabled;
+        const actualStyleDataKare = styleDataKare?.data || styleDataKare;
+        
+        const shouldEnableKare = isEnabledKare || 
+                                 (styleDataKare && actualStyleDataKare?.html) || 
+                                 (styleDataKare && actualStyleDataKare?.borderWidth !== undefined && !('enabled' in styleDataKare));
+        
+        // 处理自己的气泡样式
+        const isEnabledSelf = styleDataSelf?.enabled || styleDataSelf?.data?.enabled;
+        const actualStyleDataSelf = styleDataSelf?.data || styleDataSelf;
+        
+        const shouldEnableSelf = isEnabledSelf || 
+                               (styleDataSelf && actualStyleDataSelf?.html) || 
+                               (styleDataSelf && actualStyleDataSelf?.borderWidth !== undefined && !('enabled' in styleDataSelf));
+        
+        // 将自定义样式应用到全局样式变量
+        if (styleDataKare && shouldEnableKare && actualStyleDataKare?.html) {
+            window.customBubbleStyleKare = actualStyleDataKare;
+            console.log('应用对方气泡样式到当前聊天');
+        } else {
+            window.customBubbleStyleKare = null;
+        }
+        
+        if (styleDataSelf && shouldEnableSelf && actualStyleDataSelf?.html) {
+            window.customBubbleStyleSelf = actualStyleDataSelf;
+            console.log('应用我的气泡样式到当前聊天');
+        } else {
+            window.customBubbleStyleSelf = null;
+        }
+        
+        // 兼容旧版本：如果有旧的customBubbleStyle，保持向后兼容
+        if (window.customBubbleStyleKare && !window.customBubbleStyle) {
+            window.customBubbleStyle = window.customBubbleStyleKare;
+        }
+        
+        // 动态加载所需字体
+        if (window.fontLoader) {
+            const fontsToLoad = new Set();
+            
+            if (actualStyleDataKare?.fontFamily && shouldEnableKare) {
+                fontsToLoad.add(actualStyleDataKare.fontFamily);
+            }
+            
+            if (actualStyleDataSelf?.fontFamily && shouldEnableSelf) {
+                fontsToLoad.add(actualStyleDataSelf.fontFamily);
+            }
+            
+            if (fontsToLoad.size > 0) {
+                console.log('开始加载气泡样式所需字体:', Array.from(fontsToLoad));
+                try {
+                    const fontResults = await Promise.all(
+                        Array.from(fontsToLoad).map(font => window.fontLoader.loadFont(font))
+                    );
+                    const loadedCount = fontResults.filter(Boolean).length;
+                    console.log(`气泡字体加载完成: ${loadedCount}/${fontsToLoad.size} 成功`);
+                } catch (error) {
+                    console.warn('加载气泡字体时发生错误:', error);
+                }
+            }
+        }
+
+        // 重新渲染当前聊天消息以应用新样式
+        if (window.currentContact && (window.customBubbleStyleKare || window.customBubbleStyleSelf)) {
+            await renderMessages(false); // 明确指定非初始加载，避免滚动
+            console.log('气泡样式已应用到当前聊天');
+        } else if (!window.customBubbleStyleKare && !window.customBubbleStyleSelf) {
+            // 清除自定义样式，使用默认样式
+            window.customBubbleStyle = null;
+            console.log('未找到启用的气泡样式，使用默认样式');
+        }
+        
+    } catch (error) {
+        console.error('应用气泡样式失败:', error);
+    }
+}
+
+/**
+ * 获取当前联系人ID
+ */
+function getCurrentContactId() {
+    // 从当前活动的聊天页面获取联系人ID
+    const chatTitle = document.getElementById('chatTitle');
+    if (chatTitle && chatTitle.dataset.contactId) {
+        return chatTitle.dataset.contactId;
+    }
+    
+    // 备用方法：从全局变量或当前联系人获取
+    return window.currentContactId || (window.currentContact && window.currentContact.id) || null;
+}
+
+/**
+ * 加载自定义气泡样式
+ */
+async function loadCustomBubbleStyle() {
+    try {
+        // 同时读取两种气泡样式
+        await themeConfigManager.init();
+        const bubbleStyleKare = await themeConfigManager.getThemeConfig('bubbleStyle');
+        const bubbleStyleSelf = await themeConfigManager.getThemeConfig('bubbleStyleSelf');
+        
+        // 如果通过 themeConfigManager 获取不到，直接从数据库读取
+        let directBubbleStyleKare = null;
+        let directBubbleStyleSelf = null;
+        
+        if (!bubbleStyleKare || !bubbleStyleSelf) {
+            const results = await new Promise((resolve) => {
+                const transaction = themeConfigManager.db.transaction(['themeConfig'], 'readonly');
+                const store = transaction.objectStore('themeConfig');
+                let kare = null, self = null, completed = 0;
+                
+                const checkComplete = () => {
+                    completed++;
+                    if (completed === 2) {
+                        resolve({ kare, self });
+                    }
+                };
+                
+                const requestKare = store.get('bubbleStyle');
+                requestKare.onsuccess = () => {
+                    kare = requestKare.result;
+                    checkComplete();
+                };
+                requestKare.onerror = () => checkComplete();
+                
+                const requestSelf = store.get('bubbleStyleSelf');
+                requestSelf.onsuccess = () => {
+                    self = requestSelf.result;
+                    checkComplete();
+                };
+                requestSelf.onerror = () => checkComplete();
+            });
+            
+            directBubbleStyleKare = results.kare;
+            directBubbleStyleSelf = results.self;
+        }
+        
+        // 使用找到的数据
+        const styleDataKare = bubbleStyleKare || directBubbleStyleKare;
+        const styleDataSelf = bubbleStyleSelf || directBubbleStyleSelf;
+        
+        // console.log('加载的对方气泡样式配置:', styleDataKare);
+        // console.log('加载的我的气泡样式配置:', styleDataSelf);
+        
+        // 处理对方气泡样式
+        const isEnabledKare = styleDataKare?.enabled || styleDataKare?.data?.enabled;
+        const actualStyleDataKare = styleDataKare?.data || styleDataKare;
+        
+        const shouldEnableKare = isEnabledKare || 
+                                 (styleDataKare && actualStyleDataKare?.html) || 
+                                 (styleDataKare && actualStyleDataKare?.borderWidth !== undefined && !('enabled' in styleDataKare));
+        
+        // 处理我的气泡样式
+        const isEnabledSelf = styleDataSelf?.enabled || styleDataSelf?.data?.enabled;
+        const actualStyleDataSelf = styleDataSelf?.data || styleDataSelf;
+        
+        const shouldEnableSelf = isEnabledSelf || 
+                               (styleDataSelf && actualStyleDataSelf?.html) || 
+                               (styleDataSelf && actualStyleDataSelf?.borderWidth !== undefined && !('enabled' in styleDataSelf));
+        
+        // 应用对方气泡样式
+        if (styleDataKare && shouldEnableKare && actualStyleDataKare?.html) {
+            window.customBubbleStyleKare = actualStyleDataKare;
+            console.log('对方气泡样式已从 themeConfig 加载并启用');
+        } else {
+            window.customBubbleStyleKare = null;
+            console.log('未找到启用的对方气泡样式，使用默认样式');
+        }
+        
+        // 应用我的气泡样式
+        if (styleDataSelf && shouldEnableSelf && actualStyleDataSelf?.html) {
+            window.customBubbleStyleSelf = actualStyleDataSelf;
+            console.log('我的气泡样式已从 themeConfig 加载并启用');
+        } else {
+            window.customBubbleStyleSelf = null;
+            console.log('未找到启用的我的气泡样式，使用默认样式');
+        }
+        
+        // 兼容旧版本：如果有对方气泡样式，保持向后兼容
+        if (window.customBubbleStyleKare && !window.customBubbleStyle) {
+            window.customBubbleStyle = window.customBubbleStyleKare;
+            console.log('设置向后兼容的 customBubbleStyle');
+        } else if (!window.customBubbleStyleKare && !window.customBubbleStyleSelf) {
+            // 清除任何之前的自定义样式
+            window.customBubbleStyle = null;
+        }
+        
+    } catch (error) {
+        console.error('加载气泡样式失败:', error);
+    }
+}
+
+/**
+ * 恢复默认气泡样式
+ */
+async function resetBubbleStyleToDefault() {
+    try {
+        // 从数据库删除自定义气泡样式配置
+        await themeConfigManager.init();
+        await themeConfigManager.deleteThemeConfig('bubbleStyle');
+        
+        // 清除内存中的自定义样式
+        window.customBubbleStyle = null;
+        
+        console.log('自定义气泡样式已清除，恢复默认样式');
+        
+        // 如果当前在聊天页面，重新渲染消息以应用默认样式
+        if (window.currentContact && document.getElementById('chatPage').classList.contains('active')) {
+            await renderMessages(false); // 明确指定非初始加载，避免滚动
+        }
+        
+    } catch (error) {
+        console.error('恢复默认气泡样式失败:', error);
+        throw error;
+    }
+}
+
+
+// ===== 图片关键词优化相关函数 =====
+
+// 检查图片关键词优化配置状态
+async function checkImageKeywordStatus() {
+    try {
+        const statusElement = document.getElementById('imageKeywordStatus');
+        const configStatusElement = document.getElementById('imageKeywordConfigStatus');
+        
+        // 检查元素是否存在
+        if (!statusElement || !configStatusElement) {
+            console.warn('图片关键词状态元素未找到');
+            return;
+        }
+        
+        // 检查API配置
+        const hasApiConfig = apiSettings && apiSettings.url && apiSettings.key && apiSettings.model;
+        const hasUnsplashKey = localStorage.getItem('forumUnsplashApiKey') || localStorage.getItem('unsplashApiKey');
+        
+        let statusText = '';
+        let statusColor = '';
+        let configDetails = '';
+        
+        if (!hasApiConfig && !hasUnsplashKey) {
+            statusText = '未配置';
+            statusColor = '#dc3545';
+            configDetails = `
+                <div style="color: #dc3545;">❌ 功能未配置</div>
+                <div style="margin-top: 5px;">需要配置：</div>
+                <ul style="margin: 5px 0; padding-left: 15px;">
+                    <li>AI API 配置（用于生成关键词）</li>
+                    <li>Unsplash API Key（用于搜索图片）</li>
+                </ul>
             `;
-            listContainer.appendChild(itemEl);
+        } else if (!hasApiConfig) {
+            statusText = '部分配置';
+            statusColor = '#ffc107';
+            configDetails = `
+                <div style="color: #ffc107;">⚠️ AI API 未配置</div>
+                <div style="margin-top: 5px;">✅ Unsplash API Key 已配置</div>
+                <div style="margin-top: 5px; color: #666;">需要配置 AI API 才能生成关键词</div>
+            `;
+        } else if (!hasUnsplashKey) {
+            statusText = '部分配置';
+            statusColor = '#ffc107';
+            configDetails = `
+                <div style="color: #28a745;">✅ AI API 已配置</div>
+                <div style="color: #ffc107; margin-top: 5px;">⚠️ Unsplash API Key 未配置</div>
+                <div style="margin-top: 5px; color: #666;">需要配置 Unsplash API Key 才能搜索图片</div>
+            `;
+        } else {
+            statusText = '完全配置';
+            statusColor = '#28a745';
+            const isReady = window.imageKeywordGenerator && window.imageKeywordGenerator.isReady();
+            configDetails = `
+                <div style="color: #28a745;">✅ AI API 已配置</div>
+                <div style="color: #28a745; margin-top: 5px;">✅ Unsplash API Key 已配置</div>
+                <div style="color: #28a745; margin-top: 5px;">✅ 图片关键词生成器：${isReady ? '就绪' : '初始化中'}</div>
+                <div style="margin-top: 5px; color: #666;">功能完全可用</div>
+            `;
+        }
+        
+        statusElement.textContent = statusText;
+        statusElement.style.color = statusColor;
+        configStatusElement.innerHTML = configDetails;
+        
+        showToast('配置状态已更新');
+    } catch (error) {
+        console.error('检查图片关键词配置状态失败:', error);
+        showToast('检查状态失败: ' + error.message);
+    }
+}
+
+// 打开图片关键词设置
+function openImageKeywordSettings() {
+    showModal('apiSettingsModal');
+    showToast('请在 API 配置中设置 AI API 和 Unsplash API Key');
+}
+
+// 监听数据管理页面显示的安全方式
+function enhanceShowPageForImageKeyword() {
+    if (typeof window.showPage === 'function') {
+        const originalShowPage = window.showPage;
+        window.showPage = function(pageId) {
+            const result = originalShowPage.call(this, pageId);
+            if (pageId === 'dataManagementPage') {
+                setTimeout(() => {
+                    checkImageKeywordStatus();
+                }, 200);
+            }
+            return result;
+        };
+    } else {
+        // 如果showPage还未定义，延迟执行
+        setTimeout(enhanceShowPageForImageKeyword, 500);
+    }
+}
+
+// 页面加载完成后执行增强
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', enhanceShowPageForImageKeyword);
+} else {
+    enhanceShowPageForImageKeyword();
+}
+
+// ===== API请求队列系统 =====
+
+/**
+ * API请求队列管理器
+ */
+class APIRequestQueue {
+    constructor() {
+        this.queue = [];
+        this.isProcessing = false;
+        this.currentRequest = null;
+        this.maxRetries = 3;
+        
+        // 优先级常量
+        this.PRIORITY = {
+            URGENT: 1,    // 聊天消息
+            HIGH: 2,      // 用户主动操作
+            NORMAL: 3,    // 后台任务
+            LOW: 4        // 七夕节等特殊任务
+        };
+    }
+    
+    /**
+     * 添加API请求到队列
+     */
+    async addRequest(apiCall, options = {}) {
+        const requestItem = {
+            id: generateId(),
+            apiCall,
+            priority: options.priority || this.PRIORITY.NORMAL,
+            retries: 0,
+            maxRetries: options.maxRetries || this.maxRetries,
+            description: options.description || '未知请求',
+            onProgress: options.onProgress || null,
+            onComplete: options.onComplete || null,
+            onError: options.onError || null,
+            timestamp: Date.now()
+        };
+        
+        console.log(`[队列] 添加请求: ${requestItem.description}, 优先级: ${requestItem.priority}`);
+        
+        // 插入到合适的位置（按优先级排序）
+        let insertIndex = this.queue.length;
+        for (let i = 0; i < this.queue.length; i++) {
+            if (this.queue[i].priority > requestItem.priority) {
+                insertIndex = i;
+                break;
+            }
+        }
+        
+        this.queue.splice(insertIndex, 0, requestItem);
+        
+        // 如果没有在处理请求，立即开始处理
+        if (!this.isProcessing) {
+            this.processQueue();
+        }
+        
+        return requestItem.id;
+    }
+    
+    /**
+     * 处理队列中的请求
+     */
+    async processQueue() {
+        if (this.isProcessing || this.queue.length === 0) {
+            return;
+        }
+        
+        this.isProcessing = true;
+        console.log(`[队列] 开始处理，队列中有 ${this.queue.length} 个请求`);
+        
+        while (this.queue.length > 0) {
+            const request = this.queue.shift();
+            this.currentRequest = request;
+            
+            try {
+                console.log(`[队列] 处理请求: ${request.description}`);
+                
+                if (request.onProgress) {
+                    request.onProgress(request.id, '开始处理');
+                }
+                
+                const result = await request.apiCall();
+                
+                if (request.onComplete) {
+                    request.onComplete(request.id, result);
+                }
+                
+                console.log(`[队列] 请求完成: ${request.description}`);
+                
+            } catch (error) {
+                console.error(`[队列] 请求失败: ${request.description}`, error);
+                
+                request.retries++;
+                if (request.retries < request.maxRetries) {
+                    console.log(`[队列] 重试请求 (${request.retries}/${request.maxRetries}): ${request.description}`);
+                    // 重新加入队列，但降低优先级
+                    request.priority = Math.min(request.priority + 1, this.PRIORITY.LOW);
+                    this.queue.unshift(request);
+                } else {
+                    console.error(`[队列] 请求最终失败: ${request.description}`);
+                    if (request.onError) {
+                        request.onError(request.id, error);
+                    }
+                }
+            }
+            
+            this.currentRequest = null;
+            
+            // 添加小延迟避免过快请求
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        this.isProcessing = false;
+        console.log('[队列] 所有请求处理完成');
+    }
+    
+    /**
+     * 获取队列状态
+     */
+    getStatus() {
+        return {
+            queueLength: this.queue.length,
+            isProcessing: this.isProcessing,
+            currentRequest: this.currentRequest ? {
+                id: this.currentRequest.id,
+                description: this.currentRequest.description,
+                priority: this.currentRequest.priority
+            } : null
+        };
+    }
+    
+    /**
+     * 取消指定请求
+     */
+    cancelRequest(requestId) {
+        const index = this.queue.findIndex(req => req.id === requestId);
+        if (index !== -1) {
+            const removed = this.queue.splice(index, 1)[0];
+            console.log(`[队列] 取消请求: ${removed.description}`);
+            return true;
+        }
+        return false;
+    }
+    
+    /**
+     * 清空队列
+     */
+    clearQueue() {
+        this.queue = [];
+        console.log('[队列] 队列已清空');
+    }
+}
+
+// 创建全局队列实例
+window.apiRequestQueue = new APIRequestQueue();
+
+// ===== 通用工具函数 =====
+
+/**
+ * 生成唯一ID
+ */
+// generateId function moved to utils/formatUtils.js
+
+// ===== 渐变背景管理系统 =====
+
+/**
+ * 渐变背景管理器 - 管理特殊活动的自定义渐变背景
+ */
+class GradientBackgroundManager {
+    constructor() {
+        this.storageKey = 'statusBallCustomGradients';
+        this.customGradients = this.loadCustomGradients();
+        this.presets = this.getGradientPresets();
+    }
+    
+    /**
+     * 获取预设渐变
+     */
+    getGradientPresets() {
+        return {
+            // 七夕节预设
+            qixi_classic: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            qixi_romantic: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+            qixi_dreamy: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
+            
+            // 生日预设
+            birthday_cake: 'linear-gradient(135deg, #ff9800 0%, #f57c00 100%)',
+            birthday_party: 'linear-gradient(135deg, #ff6b6b 0%, #feca57 100%)',
+            birthday_joy: 'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)',
+            
+            // 节日预设
+            holiday_festival: 'linear-gradient(135deg, #4caf50 0%, #388e3c 100%)',
+            holiday_fireworks: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
+            holiday_celebration: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)',
+            
+            // 通用预设
+            sunrise: 'linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%)',
+            ocean: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            forest: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
+            sunset: 'linear-gradient(135deg, #ff6e7f 0%, #bfe9ff 100%)',
+            galaxy: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            aurora: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)'
+        };
+    }
+    
+    /**
+     * 从本地存储加载自定义渐变
+     */
+    loadCustomGradients() {
+        try {
+            const stored = localStorage.getItem(this.storageKey);
+            return stored ? JSON.parse(stored) : {};
+        } catch (error) {
+            console.error('加载自定义渐变失败:', error);
+            return {};
+        }
+    }
+    
+    /**
+     * 保存自定义渐变到本地存储
+     */
+    saveCustomGradients() {
+        try {
+            localStorage.setItem(this.storageKey, JSON.stringify(this.customGradients));
+        } catch (error) {
+            console.error('保存自定义渐变失败:', error);
+        }
+    }
+    
+    /**
+     * 设置自定义渐变
+     * @param {string} eventType - 事件类型
+     * @param {string} gradient - 渐变CSS
+     * @param {string} name - 渐变名称（可选）
+     */
+    setCustomGradient(eventType, gradient, name = '') {
+        if (!this.customGradients[eventType]) {
+            this.customGradients[eventType] = {};
+        }
+        
+        const gradientId = 'custom_' + Date.now();
+        this.customGradients[eventType][gradientId] = {
+            gradient: gradient,
+            name: name || `自定义渐变 ${Object.keys(this.customGradients[eventType]).length + 1}`,
+            createdAt: new Date().toISOString()
+        };
+        
+        this.saveCustomGradients();
+        return gradientId;
+    }
+    
+    /**
+     * 获取事件类型的渐变
+     * @param {string} eventType - 事件类型
+     * @param {string} gradientId - 渐变ID（可选，不提供则使用默认）
+     */
+    getGradient(eventType, gradientId = null) {
+        // 如果指定了gradientId，尝试获取自定义渐变
+        if (gradientId && this.customGradients[eventType] && this.customGradients[eventType][gradientId]) {
+            return this.customGradients[eventType][gradientId].gradient;
+        }
+        
+        // 尝试获取事件类型的默认自定义渐变
+        if (this.customGradients[eventType]) {
+            const customGradientsForEvent = Object.values(this.customGradients[eventType]);
+            if (customGradientsForEvent.length > 0) {
+                // 返回最新的自定义渐变
+                return customGradientsForEvent[customGradientsForEvent.length - 1].gradient;
+            }
+        }
+        
+        // 返回预设渐变
+        const presetKey = `${eventType}_classic`;
+        return this.presets[presetKey] || this.presets.sunrise;
+    }
+    
+    /**
+     * 获取事件类型的所有渐变
+     * @param {string} eventType - 事件类型
+     */
+    getAllGradientsForEvent(eventType) {
+        const gradients = [];
+        
+        // 添加预设渐变
+        Object.keys(this.presets).forEach(key => {
+            if (key.startsWith(eventType + '_')) {
+                gradients.push({
+                    id: key,
+                    name: this.getPresetName(key),
+                    gradient: this.presets[key],
+                    type: 'preset'
+                });
+            }
+        });
+        
+        // 添加自定义渐变
+        if (this.customGradients[eventType]) {
+            Object.entries(this.customGradients[eventType]).forEach(([id, data]) => {
+                gradients.push({
+                    id: id,
+                    name: data.name,
+                    gradient: data.gradient,
+                    type: 'custom',
+                    createdAt: data.createdAt
+                });
+            });
+        }
+        
+        return gradients;
+    }
+    
+    /**
+     * 获取预设名称
+     */
+    getPresetName(presetKey) {
+        const names = {
+            qixi_classic: '七夕经典',
+            qixi_romantic: '七夕浪漫',
+            qixi_dreamy: '七夕梦幻',
+            birthday_cake: '生日蛋糕',
+            birthday_party: '生日派对',
+            birthday_joy: '生日欢乐',
+            holiday_festival: '节日庆典',
+            holiday_fireworks: '节日烟花',
+            holiday_celebration: '节日庆祝',
+            sunrise: '日出',
+            ocean: '海洋',
+            forest: '森林',
+            sunset: '日落',
+            galaxy: '星河',
+            aurora: '极光'
+        };
+        return names[presetKey] || presetKey;
+    }
+    
+    /**
+     * 删除自定义渐变
+     * @param {string} eventType - 事件类型
+     * @param {string} gradientId - 渐变ID
+     */
+    deleteCustomGradient(eventType, gradientId) {
+        if (this.customGradients[eventType] && this.customGradients[eventType][gradientId]) {
+            delete this.customGradients[eventType][gradientId];
+            
+            // 如果该事件类型没有自定义渐变了，删除整个条目
+            if (Object.keys(this.customGradients[eventType]).length === 0) {
+                delete this.customGradients[eventType];
+            }
+            
+            this.saveCustomGradients();
+            return true;
+        }
+        return false;
+    }
+    
+    /**
+     * 创建渐变选择器UI
+     * @param {string} eventType - 事件类型
+     * @param {Function} onSelect - 选择回调
+     */
+    createGradientSelector(eventType, onSelect) {
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 20000;
+        `;
+        
+        const content = document.createElement('div');
+        content.style.cssText = `
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            max-width: 500px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        `;
+        
+        const gradients = this.getAllGradientsForEvent(eventType);
+        
+        content.innerHTML = `
+            <div style="margin-bottom: 20px;">
+                <h3 style="margin: 0 0 15px 0;">选择渐变背景</h3>
+                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <input type="text" id="customGradientInput" 
+                           placeholder="输入CSS渐变，如: linear-gradient(135deg, #ff0000 0%, #0000ff 100%)"
+                           style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <button onclick="addCustomGradient()" 
+                            style="padding: 8px 16px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                        添加
+                    </button>
+                </div>
+            </div>
+            <div id="gradientList" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px;">
+                ${gradients.map(g => `
+                    <div class="gradient-item" 
+                         style="cursor: pointer; border-radius: 8px; overflow: hidden; border: 2px solid transparent;"
+                         data-gradient="${g.gradient.replace(/"/g, '&quot;')}"
+                         data-id="${g.id}">
+                        <div style="height: 80px; background: ${g.gradient};"></div>
+                        <div style="padding: 8px; background: #f5f5f5; font-size: 12px; text-align: center;">
+                            ${g.name}
+                            ${g.type === 'custom' ? '<br><small style="color: #666;">自定义</small>' : ''}
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+            <div style="text-align: right; margin-top: 20px;">
+                <button onclick="closeGradientSelector()" 
+                        style="padding: 8px 16px; background: #666; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                    关闭
+                </button>
+            </div>
+        `;
+        
+        modal.appendChild(content);
+        document.body.appendChild(modal);
+        
+        // 添加事件处理
+        window.addCustomGradient = () => {
+            const input = document.getElementById('customGradientInput');
+            const gradient = input.value.trim();
+            if (gradient) {
+                const gradientId = this.setCustomGradient(eventType, gradient);
+                onSelect(gradient, gradientId);
+                closeGradientSelector();
+            }
+        };
+        
+        window.closeGradientSelector = () => {
+            modal.remove();
+            delete window.addCustomGradient;
+            delete window.closeGradientSelector;
+        };
+        
+        // 添加渐变选择事件
+        modal.querySelectorAll('.gradient-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const gradient = item.dataset.gradient.replace(/&quot;/g, '"');
+                const gradientId = item.dataset.id;
+                onSelect(gradient, gradientId);
+                closeGradientSelector();
+            });
+            
+            // 悬停效果
+            item.addEventListener('mouseenter', () => {
+                item.style.borderColor = '#2196F3';
+            });
+            
+            item.addEventListener('mouseleave', () => {
+                item.style.borderColor = 'transparent';
+            });
+        });
+        
+        // 点击背景关闭
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                closeGradientSelector();
+            }
         });
     }
 }
 
-/**
- * 保存(新增或修改)一个世界书条目
- */
-async function saveWorldBookEntry(event) {
-    event.preventDefault();
-    if (!currentContact) return;
+// 创建全局渐变管理器实例
+window.gradientManager = new GradientBackgroundManager();
 
-    const keywords = document.getElementById('worldBookKeywords').value.trim();
-    const entry = document.getElementById('worldBookEntry').value.trim();
-    const index = document.getElementById('worldBookEntryIndex').value;
+// ===== 状态球事件类型配置 =====
 
-    if (!keywords || !entry) {
-        showToast('关键词和条目内容均不能为空');
-        return;
-    }
-
-    if (!currentContact.worldBook) {
-        currentContact.worldBook = [];
-    }
-
-    const newEntry = { keywords, entry };
-
-    if (index !== '') {
-        // 编辑模式
-        currentContact.worldBook[parseInt(index)] = newEntry;
-        showToast('条目已更新');
-    } else {
-        // 新增模式
-        currentContact.worldBook.push(newEntry);
-        showToast('条目已添加');
-    }
-
-    await updateContactInDB(currentContact);
-    renderWorldBookUI();
-
-    // 重置表单
-    document.getElementById('worldBookForm').reset();
-    document.getElementById('worldBookEntryIndex').value = '';
-    document.getElementById('cancelEditWorldBookBtn').style.display = 'none';
-}
-
-/**
- * 进入编辑世界书条目的状态
- * @param {number} index - 条目的索引
- */
-function editWorldBookEntry(index) {
-    if (!currentContact || !currentContact.worldBook || !currentContact.worldBook[index]) return;
-
-    const item = currentContact.worldBook[index];
-    document.getElementById('worldBookKeywords').value = item.keywords;
-    document.getElementById('worldBookEntry').value = item.entry;
-    document.getElementById('worldBookEntryIndex').value = index;
-
-    // 显示取消编辑按钮并滚动到表单
-    const cancelBtn = document.getElementById('cancelEditWorldBookBtn');
-    cancelBtn.style.display = 'block';
-    cancelBtn.onclick = () => {
-         document.getElementById('worldBookForm').reset();
-         document.getElementById('worldBookEntryIndex').value = '';
-         cancelBtn.style.display = 'none';
-    };
-
-    document.getElementById('worldBookForm').scrollIntoView({ behavior: 'smooth' });
-}
-
-/**
- * 删除一个世界书条目
- * @param {number} index - 条目的索引
- */
-function deleteWorldBookEntry(index) {
-    if (!currentContact || !currentContact.worldBook) return;
-
-    showConfirmDialog('删除确认', '确定要删除这个世界书条目吗？', async () => {
-        currentContact.worldBook.splice(index, 1);
-        await updateContactInDB(currentContact);
-        renderWorldBookUI();
-        showToast('条目已删除');
-    });
-}
-
-function formatMemoryFactTime(timestamp) {
-    if (!timestamp) return '未知时间';
-    const date = new Date(timestamp);
-    if (Number.isNaN(date.getTime())) return '未知时间';
-    return date.toLocaleString('zh-CN');
-}
-
-function renderLastTriggeredMemoryFactsPanel() {
-    const container = document.getElementById('lastTriggeredFactsContent');
-    if (!container) return;
-
-    const debug = window.lastTriggeredMemoryFactsDebug || lastTriggeredMemoryFactsDebug;
-
-    if (!debug || !debug.triggeredAt || !Array.isArray(debug.facts)) {
-        container.innerHTML = '暂无触发记录。';
-        return;
-    }
-
-    if (currentContact && debug.contactId && currentContact.id !== debug.contactId) {
-        container.innerHTML = `当前显示的是其他角色的触发记录：${escapeHtml(debug.contactName || '未知角色')}`;
-        return;
-    }
-
-    const timeText = new Date(debug.triggeredAt).toLocaleString();
-
-    if (debug.facts.length === 0) {
-        container.innerHTML = `
-            <div>时间：${escapeHtml(timeText)}</div>
-            <div style="margin-top:4px;">本轮没有命中结构化记忆。</div>
-            <details style="margin-top:6px;">
-                <summary>查看本轮检索 query</summary>
-                <pre style="white-space:pre-wrap; font-size:11px;">${escapeHtml(debug.queryText || '')}</pre>
-            </details>
-        `;
-        return;
-    }
-
-    const factsHtml = debug.facts.map((fact, index) => {
-        const m = fact.metadata || {};
-        const score = typeof fact._retrievalScore === 'number'
-            ? Math.round(fact._retrievalScore * 10) / 10
-            : '未知';
-
-        return `
-            <div style="padding:8px; margin-top:8px; border:1px solid #eee; border-radius:6px; background:white;">
-                <div style="font-weight:600;">${index + 1}. ${escapeHtml(fact.factText || fact.object || '(空记忆)')}</div>
-                <div style="margin-top:4px;">score：${escapeHtml(String(score))}</div>
-                <div>subject：${escapeHtml(fact.subject || '')}</div>
-                <div>predicate：${escapeHtml(fact.predicate || '')}</div>
-                <div>type：${escapeHtml(String(m.type || '未知'))} ｜ timeScope：${escapeHtml(String(m.timeScope || '未知'))}</div>
-                <div>importance：${escapeHtml(String(fact.importance ?? '未知'))} ｜ confidence：${escapeHtml(String(fact.confidence ?? '未知'))}</div>
-            </div>
-        `;
-    }).join('');
-
-    container.innerHTML = `
-        <div>时间：${escapeHtml(timeText)}</div>
-        <div>角色：${escapeHtml(debug.contactName || '')}</div>
-        <div>命中数量：${debug.facts.length}</div>
-
-        <details style="margin-top:6px;">
-            <summary>查看本轮检索 query</summary>
-            <pre style="white-space:pre-wrap; font-size:11px;">${escapeHtml(debug.queryText || '')}</pre>
-        </details>
-
-        ${factsHtml}
-    `;
-}
-
-async function renderMemoryFactsUI(showInactive = memoryFactsShowInactive) {
-    if (!currentContact) return;
-
-    memoryFactsShowInactive = !!showInactive;
-
-    const listEl = document.getElementById('memoryFactsList');
-    const searchInputEl = document.getElementById('memoryFactsSearchInput');
-    if (!listEl) return;
-
-    const searchTerm = String(searchInputEl?.value || '').trim().toLowerCase();
-    const facts = await getMemoryFactsByContact(currentContact.id, {
-        activeOnly: !memoryFactsShowInactive
-    });
-    memoryFactsCacheForUI = Array.isArray(facts) ? facts.slice() : [];
-
-    const filtered = memoryFactsCacheForUI
-        .filter(fact => {
-            if (!searchTerm) return true;
-            const metadata = fact && fact.metadata ? fact.metadata : {};
-            const fields = [
-                fact?.subject,
-                fact?.predicate,
-                fact?.object,
-                fact?.factText,
-                metadata?.type,
-                metadata?.timeScope
-            ];
-            return fields.some(v => String(v || '').toLowerCase().includes(searchTerm));
-        })
-        .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
-
-    if (filtered.length === 0) {
-        listEl.innerHTML = '<p style="text-align:center; color:#999; padding:20px;">没有匹配的结构化记忆条目。</p>';
-        return;
-    }
-
-    listEl.innerHTML = '';
-    filtered.forEach(fact => {
-        const itemEl = document.createElement('div');
-        itemEl.className = 'world-book-item';
-
-        const isActive = fact.status === 'active' && (fact.validTo === null || fact.validTo === undefined);
-        const statusText = isActive ? '有效' : '已删除';
-        const statusColor = isActive ? '#07c160' : '#999';
-        const importance = typeof fact.importance === 'number' ? fact.importance : '-';
-        const confidence = typeof fact.confidence === 'number' ? fact.confidence : '-';
-        itemEl.innerHTML = `
-            <div class="world-book-item-header">
-                <div class="world-book-item-keywords">${escapeHtml(String(fact.subject || '(空主体)'))} · ${escapeHtml(String(fact.predicate || '(空字段)'))}</div>
-                <div class="world-book-item-actions">
-                    <button onclick="editMemoryFactFromUI('${String(fact.id).replace(/'/g, "\\'")}')">编辑</button>
-                    ${
-                        isActive
-                            ? `<button class="delete" onclick="softDeleteMemoryFactFromUI('${String(fact.id).replace(/'/g, "\\'")}')">软删除</button>`
-                            : `<button onclick="restoreMemoryFactFromUI('${String(fact.id).replace(/'/g, "\\'")}')">恢复</button>`
-                    }
-                </div>
-            </div>
-            <div class="world-book-item-entry">
-                <div><strong>内容:</strong> ${escapeHtml(String(fact.factText || fact.object || ''))}</div>
-                <div style="margin-top: 4px;"><strong>主体/关系:</strong> ${escapeHtml(String(fact.subject || ''))} / ${escapeHtml(String(fact.predicate || ''))}</div>
-                <div style="margin-top: 6px; font-size: 12px; color: #888;">
-                    类型/时间域: ${escapeHtml(String(fact?.metadata?.type || '-'))} / ${escapeHtml(String(fact?.metadata?.timeScope || '-'))}
-                </div>
-                <div style="margin-top: 2px; font-size: 12px; color: #888;">
-                    · importance: ${importance}
-                    · confidence: ${confidence}
-                    · status: <span style="color:${statusColor};">${statusText}</span>
-                </div>
-                <div style="margin-top: 2px; font-size: 12px; color: #aaa;">
-                    创建: ${escapeHtml(formatMemoryFactTime(fact.createdAt))}
-                    · 更新: ${escapeHtml(formatMemoryFactTime(fact.updatedAt || fact.createdAt))}
-                </div>
-            </div>
-        `;
-        listEl.appendChild(itemEl);
-    });
-}
-
-function editMemoryFactFromUI(factId) {
-    const target = memoryFactsCacheForUI.find(f => f && f.id === factId);
-    if (!target) {
-        showToast('未找到该记忆条目');
-        return;
-    }
-
-    document.getElementById('memoryFactEditId').value = target.id || '';
-    document.getElementById('memoryFactSubject').value = target.subject || '';
-    document.getElementById('memoryFactPredicate').value = target.predicate || '';
-    document.getElementById('memoryFactObject').value = target.object || '';
-    document.getElementById('memoryFactText').value = target.factText || '';
-    document.getElementById('memoryFactImportance').value = typeof target.importance === 'number' ? target.importance : 0.5;
-    document.getElementById('memoryFactConfidence').value = typeof target.confidence === 'number' ? target.confidence : 0.7;
-
-    const formEl = document.getElementById('memoryFactEditForm');
-    formEl.style.display = 'block';
-    formEl.scrollIntoView({ behavior: 'smooth' });
-}
-
-function cancelMemoryFactEdit() {
-    const formEl = document.getElementById('memoryFactEditForm');
-    if (formEl) {
-        formEl.reset();
-        formEl.style.display = 'none';
-    }
-    const idEl = document.getElementById('memoryFactEditId');
-    if (idEl) idEl.value = '';
-}
-
-async function saveMemoryFactFromUI(event) {
-    event.preventDefault();
-    if (!currentContact) return;
-
-    const id = document.getElementById('memoryFactEditId').value.trim();
-    if (!id) {
-        showToast('缺少条目ID，无法保存');
-        return;
-    }
-
-    const oldFact = memoryFactsCacheForUI.find(f => f && f.id === id);
-    if (!oldFact) {
-        showToast('条目不存在或已更新，请刷新后重试');
-        return;
-    }
-
-    const importanceRaw = Number(document.getElementById('memoryFactImportance').value);
-    const confidenceRaw = Number(document.getElementById('memoryFactConfidence').value);
-    const clamp01 = (n, fallback) => Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : fallback;
-
-    const updatedFact = {
-        ...oldFact,
-        subject: document.getElementById('memoryFactSubject').value.trim(),
-        predicate: document.getElementById('memoryFactPredicate').value.trim(),
-        object: document.getElementById('memoryFactObject').value.trim(),
-        factText: document.getElementById('memoryFactText').value.trim(),
-        importance: clamp01(importanceRaw, typeof oldFact.importance === 'number' ? oldFact.importance : 0.5),
-        confidence: clamp01(confidenceRaw, typeof oldFact.confidence === 'number' ? oldFact.confidence : 0.7),
-        updatedAt: Date.now()
-    };
-
-    const ok = await saveMemoryFact(updatedFact);
-    if (!ok) {
-        showToast('保存失败');
-        return;
-    }
-
-    showToast('记忆条目已保存');
-    cancelMemoryFactEdit();
-    await renderMemoryFactsUI(memoryFactsShowInactive);
-}
-
-async function softDeleteMemoryFactFromUI(factId) {
-    const target = memoryFactsCacheForUI.find(f => f && f.id === factId);
-    if (!target) {
-        showToast('未找到该记忆条目');
-        return;
-    }
-
-    showConfirmDialog('软删除确认', '确定将该结构化记忆标记为已删除吗？', async () => {
-        const updated = {
-            ...target,
-            status: 'inactive',
-            validTo: Date.now(),
-            updatedAt: Date.now(),
-            metadata: {
-                ...(target.metadata || {}),
-                invalidationSource: 'manual_ui',
-                invalidationReason: '用户在记忆条目面板手动删除'
-            }
-        };
-        const ok = await saveMemoryFact(updated);
-        if (!ok) {
-            showToast('软删除失败');
-            return;
+const STATUS_BALL_CONFIGS = {
+    qixi: {
+        name: '七夕节',
+        emoji: '🌟',
+        completedEmoji: '🎉',
+        theme: {
+            primary: '#e91e63',
+            gradient: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',  // 蓝紫渐变
+            alternativeGradients: [
+                'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',  // 粉红渐变
+                'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',  // 蓝青渐变
+                'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',  // 暖色渐变
+                'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)'   // 清新渐变
+            ]
+        },
+        titles: {
+            loading: '七夕节特殊准备中',
+            processing: '七夕节祝福生成中',
+            completed: '七夕节朋友圈生成完成'
+        },
+        descriptions: {
+            loading: '我们正在准备应用',
+            processing: '后台处理，不影响聊天',
+            completed: '已为好友生成祝福'
         }
-        showToast('已软删除');
-        await renderMemoryFactsUI(memoryFactsShowInactive);
-    });
-}
-
-async function restoreMemoryFactFromUI(factId) {
-    const target = memoryFactsCacheForUI.find(f => f && f.id === factId);
-    if (!target) {
-        showToast('未找到该记忆条目');
-        return;
+    },
+    birthday: {
+        name: '生日',
+        emoji: '🎂',
+        completedEmoji: '🎉',
+        theme: {
+            primary: '#ff9800',
+            gradient: 'linear-gradient(135deg, #ff9800 0%, #f57c00 100%)',  // 橙色渐变
+            alternativeGradients: [
+                'linear-gradient(135deg, #ff6b6b 0%, #feca57 100%)',  // 红橙渐变
+                'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)',  // 杏色渐变
+                'linear-gradient(135deg, #ff9a9e 0%, #fad0c4 100%)',  // 粉橙渐变
+                'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)'   // 温暖渐变
+            ]
+        },
+        titles: {
+            loading: '生日特殊准备中',
+            processing: '生日祝福生成中',
+            completed: '生日朋友圈生成完成'
+        },
+        descriptions: {
+            loading: '我们正在准备生日内容',
+            processing: '后台处理，不影响聊天',
+            completed: '已为好友生成生日祝福'
+        }
+    },
+    holiday: {
+        name: '节日',
+        emoji: '🎊',
+        completedEmoji: '🎉',
+        theme: {
+            primary: '#4caf50',
+            gradient: 'linear-gradient(135deg, #4caf50 0%, #388e3c 100%)',  // 绿色渐变
+            alternativeGradients: [
+                'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',  // 青绿渐变
+                'linear-gradient(135deg, #56ab2f 0%, #a8e6cf 100%)',  // 薄荷渐变
+                'linear-gradient(135deg, #1e3c72 0%, #2a5298 100%)',  // 深蓝渐变
+                'linear-gradient(135deg, #ff6e7f 0%, #bfe9ff 100%)'   // 彩虹渐变
+            ]
+        },
+        titles: {
+            loading: '节日特殊准备中',
+            processing: '节日祝福生成中',
+            completed: '节日朋友圈生成完成'
+        },
+        descriptions: {
+            loading: '我们正在准备节日内容',
+            processing: '后台处理，不影响聊天',
+            completed: '已为好友生成节日祝福'
+        }
+    },
+    // 新增：春节特殊配置
+    spring_festival: {
+        name: '春节',
+        emoji: '🧧',
+        completedEmoji: '🎊',
+        theme: {
+            primary: '#d32f2f',
+            gradient: 'linear-gradient(135deg, #d32f2f 0%, #f44336 50%, #ff9800 100%)',  // 红橙渐变
+            alternativeGradients: [
+                'linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%)',    // 红色渐变
+                'linear-gradient(135deg, #f85032 0%, #e73827 100%)',  // 深红渐变
+                'linear-gradient(135deg, #ff6b6b 0%, #ffd93d 100%)',  // 红黄渐变
+                'linear-gradient(135deg, #e52d27 0%, #b31217 100%)'   // 暗红渐变
+            ]
+        },
+        titles: {
+            loading: '春节特殊准备中',
+            processing: '春节祝福生成中',
+            completed: '春节朋友圈生成完成'
+        },
+        descriptions: {
+            loading: '我们正在准备春节内容',
+            processing: '后台处理，不影响聊天',
+            completed: '已为好友生成春节祝福'
+        }
+    },
+    // 新增：中秋特殊配置
+    mid_autumn: {
+        name: '中秋节',
+        emoji: '🌕',
+        completedEmoji: '🥮',
+        theme: {
+            primary: '#ffc107',
+            gradient: 'linear-gradient(135deg, #ffc107 0%, #ff9800 50%, #f57c00 100%)',  // 金黄渐变
+            alternativeGradients: [
+                'linear-gradient(135deg, #fff3a3 0%, #ffc107 100%)',  // 明黄渐变
+                'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)',  // 月光渐变
+                'linear-gradient(135deg, #434343 0%, #000000 100%)',  // 夜空渐变
+                'linear-gradient(135deg, #1e3c72 0%, #2a5298 100%)'   // 深夜渐变
+            ]
+        },
+        titles: {
+            loading: '中秋节特殊准备中',
+            processing: '中秋祝福生成中',
+            completed: '中秋节朋友圈生成完成'
+        },
+        descriptions: {
+            loading: '我们正在准备中秋内容',
+            processing: '后台处理，不影响聊天',
+            completed: '已为好友生成中秋祝福'
+        }
     }
-
-    const updated = {
-        ...target,
-        status: 'active',
-        validTo: null,
-        updatedAt: Date.now()
-    };
-    const ok = await saveMemoryFact(updated);
-    if (!ok) {
-        showToast('恢复失败');
-        return;
-    }
-    showToast('已恢复为有效记忆');
-    await renderMemoryFactsUI(memoryFactsShowInactive);
-}
-
-window.getLastTriggeredMemoryFacts = function() {
-    return window.lastTriggeredMemoryFactsDebug;
 };
 
+// ===== 通用状态球管理系统 =====
+
 /**
- * 根据聊天记录，找出触发了哪些世界书条目
- * @param {object} contact - 当前联系人对象
- * @param {Array<object>} messageHistory - 用于检查的消息历史记录
- * @returns {string} - 格式化好的、要补充给AI的设定文本，如果没有则返回空字符串
+ * 状态球管理器 - 统一管理所有类型的悬浮球状态
  */
-function getTriggeredWorldBookEntries(contact, messageHistory) {
-    if (!contact.worldBook || contact.worldBook.length === 0) {
-        return '';
+class StatusBallManager {
+    constructor() {
+        this.activeStates = new Map(); // 当前活跃的状态
+        this.currentState = null;      // 当前显示的状态
+        this.stateConfigs = new Map(); // 状态配置
+        this.priorityOrder = ['api_queue', 'special_event', 'system']; // 状态优先级
+        
+        // 初始化状态配置
+        this.initializeStateConfigs();
+        
+        // 监听API队列变化
+        this.startMonitoringAPIQueue();
     }
-
-    // 将消息历史拼接成一个长字符串，用于关键词检测
-    const contextString = messageHistory.map(msg => msg.content).join(' ');
-    const triggeredEntries = new Set(); // 使用Set确保每个条目只添加一次
-
-    contact.worldBook.forEach(item => {
-        // 将关键词字符串按中文逗号分割成数组
-        const keywords = item.keywords.split('，'); 
-        for (const keyword of keywords) {
-            const trimmedKeyword = keyword.trim();
-            // 如果关键词非空，并且在上下文中找到了该关键词
-            if (trimmedKeyword && contextString.includes(trimmedKeyword)) {
-                triggeredEntries.add(item.entry);
-                break; // 只要触发一个关键词，就添加该条目，然后检查下一个条目
+    
+    /**
+     * 初始化各种状态的配置
+     */
+    initializeStateConfigs() {
+        // API队列状态配置
+        this.stateConfigs.set('api_queue', {
+            name: 'API队列',
+            emoji: '✨',
+            completedEmoji: '✅',
+            theme: {
+                primary: '#2196F3',
+                gradient: 'linear-gradient(135deg, #42A5F5 0%, #1976D2 100%)'
+            },
+            titles: {
+                loading: 'API队列处理中',
+                processing: 'API请求处理中',
+                completed: 'API队列处理完成'
+            },
+            descriptions: {
+                loading: '正在处理API请求',
+                processing: '后台处理，不影响使用',
+                completed: '所有API请求已处理完成'
+            },
+            priority: 1 // 最高优先级
+        });
+        
+        // 特殊事件状态配置（继承原有的配置，并使用自定义渐变）
+        Object.keys(STATUS_BALL_CONFIGS).forEach(eventType => {
+            const baseConfig = STATUS_BALL_CONFIGS[eventType];
+            const customGradient = window.gradientManager ? 
+                window.gradientManager.getGradient(eventType) : 
+                baseConfig.theme.gradient;
+                
+            this.stateConfigs.set(`special_event_${eventType}`, {
+                ...baseConfig,
+                type: 'special_event',
+                priority: 2,
+                theme: {
+                    ...baseConfig.theme,
+                    gradient: customGradient
+                }
+            });
+        });
+        
+        // 系统状态配置
+        this.stateConfigs.set('system', {
+            name: '系统',
+            emoji: '🔧',
+            completedEmoji: '✅',
+            theme: {
+                primary: '#607D8B',
+                gradient: 'linear-gradient(135deg, #78909C 0%, #455A64 100%)'
+            },
+            titles: {
+                loading: '系统处理中',
+                processing: '后台任务执行中',
+                completed: '系统任务完成'
+            },
+            descriptions: {
+                loading: '正在执行系统任务',
+                processing: '后台处理，不影响使用',
+                completed: '系统任务已完成'
+            },
+            priority: 3
+        });
+    }
+    
+    /**
+     * 开始监控API队列状态
+     */
+    startMonitoringAPIQueue() {
+        // 每秒检查一次API队列状态
+        setInterval(() => {
+            this.updateAPIQueueStatus();
+        }, 1000);
+        
+        // 初始检查
+        this.updateAPIQueueStatus();
+    }
+    
+    /**
+     * 更新API队列状态
+     */
+    updateAPIQueueStatus() {
+        if (!window.apiRequestQueue) return;
+        
+        const status = window.apiRequestQueue.getStatus();
+        const hasActiveQueue = status.queueLength >= 2 || (status.isProcessing && status.queueLength >= 1);
+        
+        if (hasActiveQueue) {
+            // 计算进度
+            const totalTasks = status.queueLength + (status.currentRequest ? 1 : 0);
+            const completedTasks = status.currentRequest ? 1 : 0;
+            
+            const queueState = {
+                type: 'api_queue',
+                completedTasks: completedTasks,
+                totalTasks: totalTasks,
+                currentRequest: status.currentRequest,
+                queueLength: status.queueLength,
+                isProcessing: status.isProcessing,
+                config: this.stateConfigs.get('api_queue')
+            };
+            
+            this.updateState('api_queue', queueState);
+        } else {
+            this.removeState('api_queue');
+        }
+    }
+    
+    /**
+     * 显示特殊事件状态
+     */
+    showSpecialEvent(eventType, queueState) {
+        const stateKey = `special_event_${eventType}`;
+        const enhancedQueueState = {
+            ...queueState,
+            type: 'special_event',
+            eventType: eventType
+        };
+        
+        this.updateState(stateKey, enhancedQueueState);
+    }
+    
+    /**
+     * 更新状态
+     */
+    updateState(stateKey, stateData) {
+        this.activeStates.set(stateKey, stateData);
+        
+        // 检查是否需要切换显示的状态
+        this.checkAndSwitchState();
+    }
+    
+    /**
+     * 移除状态
+     */
+    removeState(stateKey) {
+        this.activeStates.delete(stateKey);
+        
+        // 如果移除的是当前显示的状态，切换到下一个状态
+        if (this.currentState === stateKey) {
+            this.currentState = null;
+            this.checkAndSwitchState();
+        }
+    }
+    
+    /**
+     * 检查并切换到最高优先级的状态
+     */
+    checkAndSwitchState() {
+        if (this.activeStates.size === 0) {
+            // 没有活跃状态，隐藏悬浮窗
+            this.hideStatusBall();
+            return;
+        }
+        
+        // 找到最高优先级的活跃状态
+        let highestPriorityState = null;
+        let highestPriority = Infinity;
+        
+        for (const [stateKey, state] of this.activeStates) {
+            const config = this.stateConfigs.get(stateKey);
+            if (config && config.priority < highestPriority) {
+                highestPriority = config.priority;
+                highestPriorityState = stateKey;
             }
         }
-    });
-
-    if (triggeredEntries.size === 0) {
-        return ''; // 没有触发任何条目
+        
+        // 如果需要切换状态
+        if (highestPriorityState && highestPriorityState !== this.currentState) {
+            this.switchToState(highestPriorityState);
+        } else if (this.currentState) {
+            // 更新当前状态
+            this.updateCurrentState();
+        }
     }
-
-    // 将触发的条目格式化成AI易于理解的格式
-    let supplementaryText = '[补充世界书设定]:\n';
-    triggeredEntries.forEach(entry => {
-        supplementaryText += `- ${entry}\n`;
-    });
-    return supplementaryText;
+    
+    /**
+     * 切换到指定状态
+     */
+    switchToState(stateKey) {
+        const state = this.activeStates.get(stateKey);
+        if (!state) return;
+        
+        this.currentState = stateKey;
+        
+        if (state.type === 'api_queue') {
+            this.showAPIQueueStatus(state);
+        } else if (state.type === 'special_event') {
+            this.showSpecialEventStatus(state);
+        }
+    }
+    
+    /**
+     * 显示API队列状态
+     */
+    showAPIQueueStatus(queueState) {
+        if (window.statusBallWindowState && window.statusBallWindowState.type === 'api_queue') {
+            // 更新现有悬浮窗
+            this.updateAPIQueueFloatingWindow(queueState);
+        } else {
+            // 创建新的悬浮窗
+            this.createAPIQueueFloatingWindow(queueState);
+        }
+    }
+    
+    /**
+     * 创建API队列悬浮窗
+     */
+    createAPIQueueFloatingWindow(queueState) {
+        // 先移除可能已存在的悬浮窗
+        hideStatusBallFloatingWindow();
+        
+        const config = queueState.config;
+        
+        // 创建容器
+        const container = document.createElement('div');
+        container.id = 'statusBallFloatingContainer';
+        container.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        `;
+        
+        // 创建详情窗口
+        const detailWindow = document.createElement('div');
+        detailWindow.id = 'statusBallDetailWindow';
+        detailWindow.style.cssText = `
+            width: 300px;
+            background: ${config.theme.gradient};
+            color: white;
+            border-radius: 12px;
+            padding: 15px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+            display: block;
+        `;
+        
+        detailWindow.innerHTML = `
+            <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                <div style="font-size: 18px;">${config.emoji}</div>
+                <div style="flex: 1; margin-left: 8px;">
+                    <div style="font-weight: bold; font-size: 14px;">${config.titles.processing}</div>
+                    <div style="font-size: 11px; opacity: 0.8;">${config.descriptions.processing}</div>
+                </div>
+                <button onclick="window.statusBallManager.collapseCurrentWindow()" 
+                        style="background: none; border: none; color: white; font-size: 16px; cursor: pointer; opacity: 0.7; padding: 2px 6px; border-radius: 3px;">
+                    −
+                </button>
+            </div>
+            
+            <div id="statusBallInfo" style="font-size: 12px; margin-bottom: 8px; opacity: 0.9;">
+                队列长度: ${queueState.queueLength} | 正在处理: ${queueState.isProcessing ? '是' : '否'}
+            </div>
+            
+            <div id="statusBallCurrentRequest" style="font-size: 11px; margin-bottom: 8px; opacity: 0.8;">
+                ${queueState.currentRequest ? `当前: ${queueState.currentRequest.description}` : '等待中...'}
+            </div>
+            
+            <div style="background: rgba(255,255,255,0.2); height: 4px; border-radius: 2px; overflow: hidden;">
+                <div id="statusBallProgressBar" 
+                     style="height: 100%; background: rgba(255,255,255,0.8); transition: width 0.3s; width: 0%;"></div>
+            </div>
+            
+            <div id="statusBallStatus" style="font-size: 11px; margin-top: 8px; opacity: 0.8;">
+                监控API队列状态...
+            </div>
+        `;
+        
+        // 创建小球
+        const floatingBall = document.createElement('div');
+        floatingBall.id = 'statusBallFloatingBall';
+        floatingBall.style.cssText = `
+            width: 50px;
+            height: 50px;
+            background: ${config.theme.gradient};
+            color: white;
+            border-radius: 50%;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.3s ease;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            position: relative;
+            backdrop-filter: blur(10px);
+        `;
+        
+        floatingBall.innerHTML = `
+            <div style="position: relative;">
+                ${config.emoji}
+                <div id="statusBallBadge" style="
+                    position: absolute;
+                    top: -8px;
+                    right: -8px;
+                    background: #ff4757;
+                    color: white;
+                    border-radius: 10px;
+                    padding: 1px 6px;
+                    font-size: 10px;
+                    font-weight: bold;
+                    min-width: 16px;
+                    text-align: center;
+                    ${queueState.queueLength === 0 ? 'display: none;' : ''}
+                ">${queueState.queueLength}</div>
+            </div>
+        `;
+        
+        // 添加到容器
+        container.appendChild(detailWindow);
+        container.appendChild(floatingBall);
+        document.body.appendChild(container);
+        
+        // 添加功能
+        makeDraggable(floatingBall, container);
+        floatingBall.addEventListener('click', () => this.expandCurrentWindow());
+        
+        // 存储状态
+        window.statusBallWindowState = {
+            container,
+            detailWindow,
+            floatingBall,
+            type: 'api_queue',
+            state: queueState,
+            isExpanded: true
+        };
+    }
+    
+    /**
+     * 更新API队列悬浮窗
+     */
+    updateAPIQueueFloatingWindow(queueState) {
+        if (!window.statusBallWindowState) return;
+        
+        const infoElement = document.getElementById('statusBallInfo');
+        const currentRequestElement = document.getElementById('statusBallCurrentRequest');
+        const statusElement = document.getElementById('statusBallStatus');
+        const badge = document.getElementById('statusBallBadge');
+        
+        if (infoElement) {
+            infoElement.textContent = `队列长度: ${queueState.queueLength} | 正在处理: ${queueState.isProcessing ? '是' : '否'}`;
+        }
+        
+        if (currentRequestElement) {
+            currentRequestElement.textContent = queueState.currentRequest 
+                ? `当前: ${queueState.currentRequest.description}` 
+                : '等待中...';
+        }
+        
+        if (statusElement) {
+            statusElement.textContent = queueState.isProcessing ? '正在处理请求...' : '监控API队列状态...';
+        }
+        
+        if (badge) {
+            badge.textContent = queueState.queueLength;
+            badge.style.display = queueState.queueLength === 0 ? 'none' : 'block';
+        }
+        
+        // 更新存储的状态
+        window.statusBallWindowState.state = queueState;
+    }
+    
+    /**
+     * 显示特殊事件状态
+     */
+    showSpecialEventStatus(eventState) {
+        // 复用现有的悬浮窗函数
+        showStatusBallFloatingWindow(eventState);
+        
+        // 更新类型标记
+        if (window.statusBallWindowState) {
+            window.statusBallWindowState.type = 'special_event';
+            window.statusBallWindowState.state = eventState;
+        }
+    }
+    
+    /**
+     * 更新当前状态
+     */
+    updateCurrentState() {
+        if (!this.currentState) return;
+        
+        const state = this.activeStates.get(this.currentState);
+        if (!state) return;
+        
+        if (state.type === 'api_queue') {
+            this.updateAPIQueueFloatingWindow(state);
+        } else if (state.type === 'special_event') {
+            updateStatusBallFloatingWindow(state);
+        }
+    }
+    
+    /**
+     * 展开当前窗口
+     */
+    expandCurrentWindow() {
+        if (!window.statusBallWindowState) return;
+        
+        const { detailWindow, floatingBall } = window.statusBallWindowState;
+        
+        detailWindow.style.display = 'block';
+        floatingBall.style.display = 'none';
+        window.statusBallWindowState.isExpanded = true;
+        
+        // 清除动画
+        floatingBall.style.animation = '';
+    }
+    
+    /**
+     * 收起当前窗口
+     */
+    collapseCurrentWindow() {
+        if (!window.statusBallWindowState) return;
+        
+        const { detailWindow, floatingBall } = window.statusBallWindowState;
+        
+        detailWindow.style.display = 'none';
+        floatingBall.style.display = 'flex';
+        window.statusBallWindowState.isExpanded = false;
+        
+        // 添加脉冲动画
+        floatingBall.style.animation = 'statusBallPulse 2s ease-in-out 3';
+    }
+    
+    /**
+     * 隐藏状态球
+     */
+    hideStatusBall() {
+        hideStatusBallFloatingWindow();
+        this.currentState = null;
+    }
+    
+    /**
+     * 获取当前状态
+     */
+    getCurrentState() {
+        return this.currentState ? this.activeStates.get(this.currentState) : null;
+    }
+    
+    /**
+     * 获取所有活跃状态
+     */
+    getActiveStates() {
+        return Array.from(this.activeStates.values());
+    }
 }
 
-// 【【【 修改：App恢复/暂停事件监听器 】】】
-document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState === 'visible') {
-        console.log("App已恢复到前台...");
-        
-        // 1. 恢复待办事项检查
-        setTimeout(processPendingTodoMessages, 500);
-        
-        // 2. 【关键修改】加上 await，等待结算彻底完成（发消息+删缓存）
-        // 只有等这里运行完了，代码才会往下走
-        await processProactiveMessagesResult();
+// 创建全局状态球管理器实例
+window.statusBallManager = new StatusBallManager();
 
-        // 3. 此时缓存已经被删干净了，这里就会正确启动新的2分钟倒计时
-        startProactiveTimer();
+
+/**
+ * 开始特殊事件流程
+ * @param {string} eventType - 事件类型 ('qixi', 'birthday', 'holiday' 等)
+ */
+async function startSpecialEventFlow(eventType = 'qixi') {
+    try {
+        const config = STATUS_BALL_CONFIGS[eventType];
+        if (!config) {
+            throw new Error(`未知的事件类型: ${eventType}`);
+        }
         
+        // 获取用户资料和联系人信息
+        const userProfile = await getUserProfile();
+        if (!userProfile || !userProfile.name) {
+            throw new Error('无法获取用户资料');
+        }
+        
+        const contactsInfo = await getAllContactsInfo();
+        if (!contactsInfo || contactsInfo.length === 0) {
+            throw new Error('没有找到任何联系人');
+        }
+        
+        // 锁定朋友圈操作
+        window.momentsLockManager.lock(`发布朋友圈功能暂时被锁定：${config.name}`);
+        
+        // 显示初始加载弹窗
+        showStatusBallLoadingModal(config);
+        updateStatusBallProgress(0, 1, '等待AI响应', config);
+        
+        // 第一步：添加获取祝福人员列表的请求到队列
+        const queueState = {
+            completedTasks: 0,
+            totalTasks: 1, // 初始只有1个任务（获取列表）
+            blessers: [],
+            eventType: eventType,
+            config: config
+        };
+        
+        const getBlessersRequestId = await window.apiRequestQueue.addRequest(
+            () => getBlessersFromAI(contactsInfo, userProfile, eventType),
+            {
+                priority: window.apiRequestQueue.PRIORITY.LOW,
+                description: `获取${config.name}祝福人员列表`,
+                onComplete: (requestId, blessers) => {
+                    console.log('获取到祝福人员列表:', blessers);
+                    queueState.blessers = blessers;
+                    queueState.totalTasks = blessers.length + 1;
+                    queueState.completedTasks = 1;
+                    
+                    // 转换为悬浮窗
+                    hideStatusBallLoadingModal();
+                    // 使用状态球管理器显示特殊事件
+                    window.statusBallManager.showSpecialEvent(eventType, queueState);
+                    
+                    // 添加生成朋友圈的请求
+                    addEventMomentsToQueue(blessers, contactsInfo, userProfile, queueState);
+                },
+                onError: (requestId, error) => {
+                    console.error('获取祝福人员失败:', error);
+                    hideStatusBallLoadingModal();
+                    window.momentsLockManager.unlock(); // 出错时解锁
+                    showApiError(error);
+                }
+            }
+        );
+        
+    } catch (error) {
+        console.error(`${eventType}流程启动失败:`, error);
+        hideStatusBallLoadingModal();
+        window.momentsLockManager.unlock(); // 出错时解锁
+        const config = STATUS_BALL_CONFIGS[eventType] || STATUS_BALL_CONFIGS.qixi;
+        showApiError(error);
+    }
+}
+
+// 暴露特殊事件流程函数到全局
+window.startSpecialEventFlow = startSpecialEventFlow;
+
+/**
+ * 显示状态球加载弹窗
+ * @param {Object} config - 事件配置
+ */
+function showStatusBallLoadingModal(config) {
+    const modal = document.createElement('div');
+    modal.id = 'statusBallLoadingModal';
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="text-align: center; padding: 30px;">
+            <h3 style="color: ${config.theme.primary}; margin-bottom: 20px;">${config.emoji} ${config.titles.loading} ${config.emoji}</h3>
+            <p style="margin-bottom: 20px;">请稍等。<br>${config.descriptions.loading}。<br>正在等待API响应……</p>
+            <div id="statusBallProgress" style="margin-bottom: 15px; font-weight: bold; color: ${config.theme.primary};">(0/1)</div>
+            <div style="width: 100%; height: 4px; background-color: #f0f0f0; border-radius: 2px; overflow: hidden;">
+                <div id="statusBallProgressBar" style="width: 0%; height: 100%; background-color: ${config.theme.primary}; transition: width 0.3s;"></div>
+            </div>
+            <p style="margin-top: 15px; font-size: 12px; color: #666;">请不要关闭应用</p>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.style.display = 'block';
+}
+
+/**
+ * 更新状态球进度
+ * @param {number} current - 当前进度
+ * @param {number} total - 总进度
+ * @param {string} message - 进度消息
+ * @param {Object} config - 事件配置
+ */
+function updateStatusBallProgress(current, total, message = '', config) {
+    const progressElement = document.getElementById('statusBallProgress');
+    const progressBar = document.getElementById('statusBallProgressBar');
+    
+    if (progressElement && progressBar) {
+        const percentage = Math.round((current / total) * 100);
+        progressElement.textContent = `(${current}/${total}) ${message}`;
+        progressBar.style.width = percentage + '%';
+    }
+}
+
+/**
+ * 隐藏状态球加载弹窗
+ */
+function hideStatusBallLoadingModal() {
+    const modal = document.getElementById('statusBallLoadingModal');
+    if (modal) {
+        modal.remove();
+    }
+}
+
+/**
+ * 显示七夕节完成弹窗
+ */
+function showQixiCompleteModal() {
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+        <div class="modal-content" style="text-align: center; padding: 30px;">
+            <h3 style="color: #e91e63; margin-bottom: 20px;">🎉 欢迎 🎉</h3>
+            <p style="margin-bottom: 20px;">朋友圈 更新了一些新内容~</p>
+            <button onclick="this.parentElement.parentElement.remove()" 
+                    style="background-color: #e91e63; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">
+                查看朋友圈
+            </button>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    modal.style.display = 'block';
+    
+    // 3秒后自动关闭
+    setTimeout(() => {
+        modal.remove();
+    }, 3000);
+}
+
+/**
+ * 获取所有联系人信息
+ */
+async function getAllContactsInfo() {
+    try {
+        // 确保contacts已加载
+        if (!window.contacts || window.contacts.length === 0) {
+            console.warn('联系人列表为空，尝试从数据库重新加载');
+            await loadDataFromDB();
+        }
+        
+        return window.contacts.filter(contact => contact.type === 'private');
+    } catch (error) {
+        console.error('获取联系人信息失败:', error);
+        throw error;
+    }
+}
+
+/**
+ * 通过AI判断可能送祝福的人员
+ * @param {Array} contactsInfo - 联系人信息
+ * @param {Object} userProfile - 用户资料
+ * @param {string} eventType - 事件类型
+ */
+async function getBlessersFromAI(contactsInfo, userProfile, eventType = 'qixi') {
+    try {
+        if (!window.apiService || !apiSettings) {
+            throw new Error('API服务未初始化');
+        }
+        
+        // 构建联系人信息字符串
+        const contactsString = contactsInfo.map(contact => 
+            `【${contact.name}】人设为：${contact.personality}`
+        ).join('\n');
+        
+        // 获取事件配置
+        const config = STATUS_BALL_CONFIGS[eventType];
+        const eventName = config ? config.name : '特殊日子';
+        
+        // 根据事件类型构建不同的prompt
+        let eventDescription = '';
+        switch (eventType) {
+            case 'qixi':
+                eventDescription = '今天是中国传统节日【七夕节】';
+                break;
+            case 'birthday':
+                eventDescription = `今天是用户【${userProfile.name}】的生日`;
+                break;
+            case 'holiday':
+                eventDescription = '今天是特殊节日';
+                break;
+            default:
+                eventDescription = '今天是特殊日子';
+        }
+        
+        // 构建请求prompt
+        const prompt = `${eventDescription}。请判断以下人物中，可能在${eventName}给用户（${userProfile.name}）送上祝福的有谁？输出所有可能的人名为列表，如["A", "B"]。
+
+${contactsString}
+
+用户${userProfile.name}的人设为：${userProfile.personality || '无'}
+
+请直接返回JSON格式的列表，列表内的名字必须为【】内的用户名。不要包含其他解释。`;
+
+        // 调用API
+        const response = await window.apiService.callOpenAIAPI(
+            apiSettings.url,
+            apiSettings.key,
+            apiSettings.model,
+            [{ role: 'user', content: prompt }],
+            {
+                temperature: 0.7,
+                max_tokens: 5000,
+            },
+            apiSettings.timeout * 1000 || 30000
+        );
+        
+        const rawContent = response.choices[0]?.message?.content;
+        console.log('AI返回的原始内容:', rawContent);
+        
+        if (!rawContent) {
+            console.error('ERROR: AI返回的内容为空 - API完整返回:', JSON.stringify(response, null, 2));
+            throw new Error('AI返回空内容');
+        }
+        
+        // 提取人名列表
+        let blessers = [];
+        try {
+            // 尝试直接解析JSON
+            const match = rawContent.match(/\[.*?\]/);
+            if (match) {
+                blessers = JSON.parse(match[0]);
+            } else {
+                // 如果没有找到JSON数组，尝试提取引号中的名字
+                const names = rawContent.match(/"([^"]+)"/g);
+                if (names) {
+                    blessers = names.map(name => name.replace(/"/g, ''));
+                }
+            }
+        } catch (parseError) {
+            console.warn('解析AI回复失败，尝试正则提取:', parseError);
+            // 使用正则表达式提取可能的人名
+            const names = rawContent.match(/["']([^"']+)["']/g);
+            if (names) {
+                blessers = names.map(name => name.replace(/["']/g, ''));
+            }
+        }
+        
+        // 验证人名是否存在于联系人中
+        const validBlessers = blessers.filter(name => 
+            contactsInfo.some(contact => contact.name === name)
+        );
+        
+        console.log('有效的祝福人员:', validBlessers);
+        return validBlessers;
+        
+    } catch (error) {
+        console.error('AI判断祝福人员失败:', error);
+        throw error;
+    }
+}
+
+/**
+ * 为指定联系人生成特殊事件朋友圈
+ * @param {Object} contact - 联系人信息
+ * @param {Object} userProfile - 用户资料
+ * @param {string} eventType - 事件类型
+ */
+async function generateEventMoment(contact, userProfile, eventType = 'qixi') {
+    try {
+        const config = STATUS_BALL_CONFIGS[eventType];
+        const eventName = config ? config.name : '特殊日子';
+        const topic = `${eventName}给${userProfile.name}的祝福`;
+        
+        // 调用现有的朋友圈生成函数
+        const result = await generateMomentAndComments(contact, userProfile, topic);
+        
+        if (result && result.content) {
+            console.log(`成功为 ${contact.name} 生成${eventName}朋友圈:`, result.content);
+            
+            // 生成事件日期
+            const eventDate = new Date();
+            
+            // 根据事件类型设置日期
+            if (eventType === 'qixi') {
+                eventDate.setMonth(7); // 8月（月份从0开始）
+                eventDate.setDate(29);
+            } else if (eventType === 'birthday') {
+                // 生日保持当前日期
+            } else {
+                // 其他节日保持当前日期
+            }
+            
+            eventDate.setHours(0, 0, 0, 0); // 零点整
+            
+            // 只随机化秒数，保持都在零点零分
+            const randomSeconds = Math.floor(Math.random() * 60); // 0-59秒
+            eventDate.setSeconds(randomSeconds);
+            
+            // 保存朋友圈到数据库
+            const moment = {
+                id: generateId(),
+                authorId: contact.id,
+                authorName: contact.name,
+                content: result.content,
+                imageUrl: null, // 暂时不处理图片
+                likes: [],
+                comments: result.comments || [], // 稍后处理评论时间
+                timestamp: eventDate.toISOString(),
+                time: eventDate.toISOString(), // 添加time字段，朋友圈渲染需要这个
+                topic: topic // 添加主题标记
+            };
+            
+            // 修正评论的时间戳也为事件当天零点
+            if (moment.comments && moment.comments.length > 0) {
+                moment.comments.forEach((comment, index) => {
+                    // 给每个评论一个稍晚的时间（在朋友圈发布后的几秒内）
+                    const commentTime = new Date(eventDate);
+                    commentTime.setSeconds(commentTime.getSeconds() + 10 + index * 5); // 朋友圈发布后10秒开始，每个评论间隔5秒
+                    comment.timestamp = commentTime.toISOString();
+                });
+            }
+            
+            // 添加到全局朋友圈列表
+            console.log(`当前朋友圈数量: ${moments.length}`);
+            moments.unshift(moment);
+            console.log(`添加后朋友圈数量: ${moments.length}`);
+            console.log(`新添加的朋友圈:`, { 
+                id: moment.id, 
+                authorName: moment.authorName, 
+                content: moment.content.substring(0, 50) + '...' 
+            });
+            
+            // 保存到数据库
+            await saveDataToDB();
+            console.log('朋友圈已保存到数据库');
+            
+            console.log(`${eventName}朋友圈已保存到数据库: ${contact.name}`);
+            return result;
+        } else {
+            throw new Error('生成的朋友圈内容为空');
+        }
+    } catch (error) {
+        console.error(`为 ${contact.name} 生成${eventName}朋友圈失败:`, error);
+        throw error;
+    }
+}
+
+/**
+ * 将特殊事件朋友圈生成请求添加到队列
+ */
+async function addEventMomentsToQueue(blessers, contactsInfo, userProfile, queueState) {
+    for (const blesserName of blessers) {
+        const contact = contactsInfo.find(c => c.name === blesserName);
+        if (contact) {
+            await window.apiRequestQueue.addRequest(
+                () => generateEventMoment(contact, userProfile, queueState.eventType),
+                {
+                    priority: window.apiRequestQueue.PRIORITY.LOW,
+                    description: `生成${blesserName}的${queueState.config.name}祝福朋友圈`,
+                    onProgress: (requestId, status) => {
+                        // 确保使用七夕渐变
+                        if (queueState.eventType === 'qixi' && window.statusBallWindowState) {
+                            const { detailWindow } = window.statusBallWindowState;
+                            if (detailWindow) {
+                                // 强制应用七夕渐变
+                                detailWindow.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                            }
+                        }
+                        updateStatusBallFloatingWindow(queueState, `正在为 ${blesserName} 生成祝福...`);
+                    },
+                    onComplete: (requestId, result) => {
+                        queueState.completedTasks++;
+                        updateStatusBallFloatingWindow(queueState, `已完成 ${blesserName} 的祝福`);
+                        
+                        // 如果所有任务都完成了，显示完成提示
+                        if (queueState.completedTasks >= queueState.totalTasks) {
+                            setTimeout(() => {
+                                // 解锁朋友圈操作
+                                window.momentsLockManager.unlock();
+                                
+                                // 显示完成状态
+                                showStatusBallCompletionState(queueState);
+                                // 通知状态球管理器任务完成
+                                if (queueState.eventType && window.statusBallManager) {
+                                    // 特殊事件完成后自动移除状态，让API队列状态（如果有）可以显示
+                                    setTimeout(() => {
+                                        window.statusBallManager.removeState(`special_event_${queueState.eventType}`);
+                                    }, 3000); // 3秒后自动移除
+                                }
+                            }, 1000);
+                        }
+                    },
+                    onError: (requestId, error) => {
+                        console.error(`为 ${blesserName} 生成朋友圈失败:`, error);
+                        queueState.completedTasks++;
+                        updateStatusBallFloatingWindow(queueState, `${blesserName} 生成失败`);
+                    }
+                }
+            );
+        }
+    }
+}
+
+/**
+ * 显示状态球悬浮窗
+ */
+function showStatusBallFloatingWindow(queueState) {
+    // 先移除可能已存在的悬浮窗
+    hideStatusBallFloatingWindow();
+    
+    // 创建容器
+    const container = document.createElement('div');
+    container.id = 'statusBallFloatingContainer';
+    container.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 10000;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    `;
+    
+    // 获取事件配置
+    const config = queueState.config;
+    
+    // 创建详情窗口（默认显示）
+    const detailWindow = document.createElement('div');
+    detailWindow.id = 'statusBallDetailWindow';
+    
+    // 获取渐变样式
+    const gradientStyle = queueState.eventType === 'qixi' 
+        ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'  // 强制使用七夕蓝紫渐变
+        : config.theme.gradient;
+    
+    console.log(`显示悬浮窗，事件类型: ${queueState.eventType}, 使用渐变: ${gradientStyle}`);
+    
+    detailWindow.style.cssText = `
+        width: 280px;
+        background: ${gradientStyle};
+        color: white;
+        border-radius: 12px;
+        padding: 15px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        backdrop-filter: blur(10px);
+        transition: all 0.3s ease;
+        display: block;
+    `;
+    
+    detailWindow.innerHTML = `
+        <div style="display: flex; align-items: center; margin-bottom: 12px;">
+            <div style="font-size: 18px;">${config.emoji}</div>
+            <div style="flex: 1; margin-left: 8px;">
+                <div style="font-weight: bold; font-size: 14px;">${config.titles.processing}</div>
+                <div style="font-size: 11px; opacity: 0.8;">${config.descriptions.processing}</div>
+            </div>
+            <button onclick="collapseStatusBallWindow()" 
+                    style="background: none; border: none; color: white; font-size: 16px; cursor: pointer; opacity: 0.7; padding: 2px 6px; border-radius: 3px;">
+                −
+            </button>
+        </div>
+        
+        <div id="statusBallFloatingProgress" style="font-size: 12px; margin-bottom: 8px; opacity: 0.9;">
+            (${queueState.completedTasks}/${queueState.totalTasks}) 正在处理...
+        </div>
+        
+        <div style="background: rgba(255,255,255,0.2); height: 4px; border-radius: 2px; overflow: hidden;">
+            <div id="statusBallFloatingProgressBar" 
+                 style="height: 100%; background: rgba(255,255,255,0.8); transition: width 0.3s; width: ${Math.round((queueState.completedTasks / queueState.totalTasks) * 100)}%;"></div>
+        </div>
+        
+        <div id="statusBallFloatingStatus" style="font-size: 11px; margin-top: 8px; opacity: 0.8;">
+            正在生成朋友圈...
+        </div>
+    `;
+    
+    // 创建小球（默认隐藏）
+    const floatingBall = document.createElement('div');
+    floatingBall.id = 'statusBallFloatingBall';
+    
+    // 使用相同的渐变样式
+    floatingBall.style.cssText = `
+        width: 50px;
+        height: 50px;
+        background: ${gradientStyle};
+        color: white;
+        border-radius: 50%;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        cursor: pointer;
+        user-select: none;
+        transition: all 0.3s ease;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        position: relative;
+        backdrop-filter: blur(10px);
+    `;
+    
+    floatingBall.innerHTML = `
+        <div style="position: relative;">
+            ${config.emoji}
+            <div id="statusBallBadge" style="
+                position: absolute;
+                top: -8px;
+                right: -8px;
+                background: #ff4757;
+                color: white;
+                border-radius: 10px;
+                padding: 1px 6px;
+                font-size: 10px;
+                font-weight: bold;
+                min-width: 16px;
+                text-align: center;
+            ">${queueState.totalTasks - queueState.completedTasks}</div>
+        </div>
+    `;
+    
+    // 添加到容器
+    container.appendChild(detailWindow);
+    container.appendChild(floatingBall);
+    document.body.appendChild(container);
+    
+    // 添加小球的拖拽功能
+    makeDraggable(floatingBall, container);
+    
+    // 添加小球点击展开功能
+    floatingBall.addEventListener('click', expandStatusBallWindow);
+    
+    // 存储状态
+    window.statusBallWindowState = {
+        container,
+        detailWindow,
+        floatingBall,
+        queueState,
+        isExpanded: true
+    };
+}
+
+/**
+ * 更新状态球悬浮窗
+ */
+function updateStatusBallFloatingWindow(queueState, message = '') {
+    const progressElement = document.getElementById('statusBallFloatingProgress');
+    const progressBar = document.getElementById('statusBallFloatingProgressBar');
+    const statusElement = document.getElementById('statusBallFloatingStatus');
+    const badge = document.getElementById('statusBallBadge');
+    
+    if (progressElement && progressBar && statusElement) {
+        const percentage = Math.round((queueState.completedTasks / queueState.totalTasks) * 100);
+        progressElement.textContent = `(${queueState.completedTasks}/${queueState.totalTasks}) 正在处理...`;
+        progressBar.style.width = percentage + '%';
+        statusElement.textContent = message || '正在生成朋友圈...';
+    }
+    
+    // 更新小球上的徽章数字
+    if (badge) {
+        const remaining = queueState.totalTasks - queueState.completedTasks;
+        badge.textContent = remaining;
+        if (remaining === 0) {
+            badge.style.display = 'none';
+        }
+    }
+    
+    // 更新全局状态
+    if (window.statusBallWindowState) {
+        window.statusBallWindowState.queueState = queueState;
+    }
+}
+
+/**
+ * 隐藏状态球悬浮窗
+ */
+function hideStatusBallFloatingWindow() {
+    const container = document.getElementById('statusBallFloatingContainer');
+    if (container) {
+        container.remove();
+    }
+    window.statusBallWindowState = null;
+}
+
+/**
+ * 收起悬浮窗，显示小球
+ */
+function collapseStatusBallWindow() {
+    if (!window.statusBallWindowState) return;
+    
+    const { detailWindow, floatingBall } = window.statusBallWindowState;
+    
+    // 隐藏详情窗口，显示小球
+    detailWindow.style.display = 'none';
+    floatingBall.style.display = 'flex';
+    
+    window.statusBallWindowState.isExpanded = false;
+    
+    // 添加小球闪烁效果提示用户
+    floatingBall.style.animation = 'statusBallPulse 2s ease-in-out 3';
+    
+    // 添加CSS动画
+    if (!document.getElementById('statusBallAnimations')) {
+        const style = document.createElement('style');
+        style.id = 'statusBallAnimations';
+        style.textContent = `
+            @keyframes statusBallPulse {
+                0%, 100% { transform: scale(1); }
+                50% { transform: scale(1.1); }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+}
+
+/**
+ * 展开悬浮窗，隐藏小球
+ */
+function expandStatusBallWindow() {
+    if (!window.statusBallWindowState) return;
+    
+    const { container, detailWindow, floatingBall } = window.statusBallWindowState;
+    
+    // 在展开前调整容器位置，确保详情窗口在屏幕内
+    adjustContainerPosition(container, detailWindow);
+    
+    // 显示详情窗口，隐藏小球
+    floatingBall.style.display = 'none';
+    detailWindow.style.display = 'block';
+    
+    window.statusBallWindowState.isExpanded = true;
+    
+    // 清除小球动画
+    floatingBall.style.animation = '';
+}
+
+/**
+ * 调整容器位置，确保详情窗口在屏幕内
+ */
+function adjustContainerPosition(container, detailWindow) {
+    // 获取当前容器位置
+    const containerRect = container.getBoundingClientRect();
+    
+    // 获取窗口尺寸
+    const windowWidth = window.innerWidth;
+    const windowHeight = window.innerHeight;
+    
+    // 获取详情窗口的实际尺寸
+    // 暂时显示详情窗口以获取准确尺寸
+    const wasVisible = detailWindow.style.display !== 'none';
+    if (!wasVisible) {
+        detailWindow.style.display = 'block';
+        detailWindow.style.visibility = 'hidden'; // 隐藏但占用空间
+    }
+    
+    const detailRect = detailWindow.getBoundingClientRect();
+    const detailWindowWidth = detailRect.width || 280;
+    const detailWindowHeight = detailRect.height || 200;
+    
+    // 恢复原始显示状态
+    if (!wasVisible) {
+        detailWindow.style.display = 'none';
+        detailWindow.style.visibility = 'visible';
+    }
+    
+    // 安全边距
+    const safeMargin = 20;
+    
+    // 计算当前容器位置
+    let currentLeft = containerRect.left;
+    let currentTop = containerRect.top;
+    
+    // 记录是否进行了调整
+    let adjusted = false;
+    
+    // 检查并调整水平位置
+    if (currentLeft + detailWindowWidth + safeMargin > windowWidth) {
+        // 如果右边超出，向左调整
+        currentLeft = windowWidth - detailWindowWidth - safeMargin;
+        adjusted = true;
+    }
+    if (currentLeft < safeMargin) {
+        // 如果左边超出，向右调整
+        currentLeft = safeMargin;
+        adjusted = true;
+    }
+    
+    // 检查并调整垂直位置
+    if (currentTop + detailWindowHeight + safeMargin > windowHeight) {
+        // 如果下边超出，向上调整
+        currentTop = windowHeight - detailWindowHeight - safeMargin;
+        adjusted = true;
+    }
+    if (currentTop < safeMargin) {
+        // 如果上边超出，向下调整
+        currentTop = safeMargin;
+        adjusted = true;
+    }
+    
+    // 只在需要调整时应用新位置
+    if (adjusted) {
+        container.style.left = currentLeft + 'px';
+        container.style.top = currentTop + 'px';
+        container.style.right = 'auto';
+        container.style.bottom = 'auto';
+        
+        console.log(`[悬浮窗] 位置调整: (${Math.round(containerRect.left)}, ${Math.round(containerRect.top)}) -> (${Math.round(currentLeft)}, ${Math.round(currentTop)})`);
     } else {
-        console.log("App进入后台...");
-        // 用户离开，停止刷新。
-        // 此时，最后一次设定的通知（1小时后触发）将生效。
-        stopProactiveTimer();
+        console.log(`[悬浮窗] 位置无需调整: (${Math.round(containerRect.left)}, ${Math.round(containerRect.top)})`);
+    }
+}
+
+/**
+ * 计算智能边界限制
+ */
+function calculateSmartBounds(proposedLeft, proposedTop, container) {
+    const windowWidth = window.innerWidth;
+    const windowHeight = window.innerHeight;
+    
+    // 详情窗口尺寸
+    const detailWindowWidth = 280;
+    const detailWindowHeight = 200;
+    
+    // 小球尺寸
+    const ballSize = 50;
+    
+    // 安全边距
+    const safeMargin = 20;
+    
+    let newLeft = proposedLeft;
+    let newTop = proposedTop;
+    
+    // 水平边界检查
+    // 确保小球本身不超出屏幕
+    newLeft = Math.max(safeMargin, newLeft);
+    newLeft = Math.min(windowWidth - ballSize - safeMargin, newLeft);
+    
+    // 额外检查：确保从任意位置都能展开详情窗口
+    // 如果小球在屏幕右边缘，但详情窗口无法完全显示，则限制小球位置
+    const maxLeftForExpansion = windowWidth - detailWindowWidth - safeMargin;
+    if (newLeft > maxLeftForExpansion) {
+        // 小球可以在右边缘，但展开时会自动调整位置
+        // 这里不强制限制，让智能定位函数处理
+    }
+    
+    // 垂直边界检查
+    newTop = Math.max(safeMargin, newTop);
+    newTop = Math.min(windowHeight - ballSize - safeMargin, newTop);
+    
+    // 额外检查：确保从任意位置都能展开详情窗口
+    const maxTopForExpansion = windowHeight - detailWindowHeight - safeMargin;
+    if (newTop > maxTopForExpansion) {
+        // 同样，让智能定位函数处理
+    }
+    
+    return { newLeft, newTop };
+}
+
+/**
+ * 使元素可拖拽
+ */
+function makeDraggable(element, container) {
+    let isDragging = false;
+    let startX, startY, startLeft, startTop;
+    let hasMoved = false;
+    
+    function onMouseDown(e) {
+        isDragging = true;
+        hasMoved = false;
+        
+        const rect = container.getBoundingClientRect();
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeft = rect.left;
+        startTop = rect.top;
+        
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+        
+        e.preventDefault();
+    }
+    
+    function onMouseMove(e) {
+        if (!isDragging) return;
+        
+        hasMoved = true;
+        
+        const deltaX = e.clientX - startX;
+        const deltaY = e.clientY - startY;
+        
+        let newLeft = startLeft + deltaX;
+        let newTop = startTop + deltaY;
+        
+        // 智能边界限制，考虑详情窗口展开的空间需求
+        const { newLeft: adjustedLeft, newTop: adjustedTop } = calculateSmartBounds(newLeft, newTop, container);
+        
+        container.style.left = adjustedLeft + 'px';
+        container.style.top = adjustedTop + 'px';
+        container.style.right = 'auto';
+        container.style.bottom = 'auto';
+    }
+    
+    function onMouseUp(e) {
+        isDragging = false;
+        
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        
+        // 如果没有移动，则触发点击事件
+        if (!hasMoved) {
+            expandStatusBallWindow();
+        }
+    }
+    
+    // 触摸事件支持
+    function onTouchStart(e) {
+        const touch = e.touches[0];
+        onMouseDown({
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            preventDefault: () => e.preventDefault()
+        });
+    }
+    
+    function onTouchMove(e) {
+        if (!isDragging) return;
+        const touch = e.touches[0];
+        onMouseMove({
+            clientX: touch.clientX,
+            clientY: touch.clientY
+        });
+        e.preventDefault();
+    }
+    
+    function onTouchEnd(e) {
+        onMouseUp({});
+        e.preventDefault();
+    }
+    
+    // 绑定事件
+    element.addEventListener('mousedown', onMouseDown);
+    element.addEventListener('touchstart', onTouchStart, { passive: false });
+    element.addEventListener('touchmove', onTouchMove, { passive: false });
+    element.addEventListener('touchend', onTouchEnd, { passive: false });
+}
+
+/**
+ * 显示状态球完成状态
+ */
+function showStatusBallCompletionState(queueState) {
+    if (!window.statusBallWindowState) return;
+    
+    const { detailWindow, floatingBall } = window.statusBallWindowState;
+    const config = queueState.config;
+    
+    // 更新详情窗口内容为完成状态
+    detailWindow.innerHTML = `
+        <div style="display: flex; align-items: center; margin-bottom: 15px;">
+            <div style="font-size: 24px;">${config.completedEmoji}</div>
+            <div style="flex: 1; margin-left: 8px;">
+                <div style="font-weight: bold; font-size: 14px;">${config.titles.completed}</div>
+                <div style="font-size: 11px; opacity: 0.8;">${config.descriptions.completed} ${queueState.totalTasks - 1} 位好友</div>
+            </div>
+            <button onclick="hideStatusBallFloatingWindow()" 
+                    style="background: none; border: none; color: white; font-size: 16px; cursor: pointer; opacity: 0.7; padding: 2px 6px; border-radius: 3px;">
+                ×
+            </button>
+        </div>
+        
+        <div style="text-align: center; margin: 20px 0;">
+            <div style="font-size: 14px; margin-bottom: 15px; line-height: 1.4;">
+                所有朋友圈已生成完毕<br>
+                是否刷新页面查看新内容？
+            </div>
+            
+            <div style="display: flex; gap: 10px; justify-content: center;">
+                <button onclick="refreshMomentsPage()" 
+                        style="background: rgba(255,255,255,0.9); color: ${config.theme.primary}; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 12px;">
+                    刷新页面
+                </button>
+                <button onclick="collapseStatusBallWindow()" 
+                        style="background: rgba(255,255,255,0.2); color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 12px;">
+                    稍后查看
+                </button>
+            </div>
+        </div>
+    `;
+    
+    // 如果当前是收起状态，则展开显示完成信息
+    if (!window.statusBallWindowState.isExpanded) {
+        // 在展开前调整位置，确保完成界面完全可见
+        adjustContainerPosition(window.statusBallWindowState.container, detailWindow);
+        
+        // 显示详情窗口，隐藏小球
+        window.statusBallWindowState.floatingBall.style.display = 'none';
+        detailWindow.style.display = 'block';
+        window.statusBallWindowState.isExpanded = true;
+    }
+    
+    // 添加完成动画
+    detailWindow.style.animation = 'statusBallComplete 0.5s ease-out';
+    
+    // 更新小球为完成状态
+    floatingBall.innerHTML = `
+        <div style="position: relative;">
+            ${config.completedEmoji}
+        </div>
+    `;
+    
+    // 添加CSS动画
+    if (!document.getElementById('statusBallCompleteAnimations')) {
+        const style = document.createElement('style');
+        style.id = 'statusBallCompleteAnimations';
+        style.textContent = `
+            @keyframes statusBallComplete {
+                0% { transform: scale(0.9); opacity: 0.8; }
+                50% { transform: scale(1.05); }
+                100% { transform: scale(1); opacity: 1; }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+}
+
+/**
+ * 刷新朋友圈页面
+ */
+async function refreshMomentsPage() {
+    try {
+        console.log('[特殊事件] 开始刷新朋友圈页面');
+        
+        // 显示加载提示
+        if (window.statusBallWindowState && window.statusBallWindowState.detailWindow) {
+            const detailWindow = window.statusBallWindowState.detailWindow;
+            detailWindow.innerHTML = `
+                <div style="text-align: center; padding: 20px;">
+                    <div style="font-size: 20px; margin-bottom: 10px;">🔄</div>
+                    <div style="font-size: 14px;">正在刷新朋友圈...</div>
+                </div>
+            `;
+        }
+        
+        // 重新从数据库加载数据
+        await loadDataFromDB();
+        
+        // 如果当前在朋友圈页面，刷新显示
+        if (typeof renderMomentsList === 'function') {
+            await renderMomentsList();
+        }
+        
+        // 显示成功提示并关闭悬浮窗
+        showToast('朋友圈已刷新完成！');
+        setTimeout(() => {
+            hideQixiFloatingWindow();
+        }, 1500);
+        
+        console.log('[特殊事件] 朋友圈页面刷新完成');
+        
+    } catch (error) {
+        console.error('[七夕节] 刷新朋友圈页面失败:', error);
+        showToast('刷新失败，请手动刷新页面');
+    }
+}
+
+// 将函数设为全局可访问
+// 向后兼容的别名（如果需要的话）
+window.hideQixiFloatingWindow = hideStatusBallFloatingWindow;
+window.collapseQixiWindow = collapseStatusBallWindow;
+window.expandQixiWindow = expandStatusBallWindow;
+
+// 新的统一命名
+window.hideStatusBallFloatingWindow = hideStatusBallFloatingWindow;
+window.collapseStatusBallWindow = collapseStatusBallWindow;
+window.expandStatusBallWindow = expandStatusBallWindow;
+window.refreshMomentsPage = refreshMomentsPage;
+
+/**
+ * 触发特殊事件状态球
+ * @param {string} eventType - 事件类型 ('qixi', 'birthday', 'holiday')
+ */
+window.triggerSpecialEvent = function(eventType) {
+    if (STATUS_BALL_CONFIGS[eventType]) {
+        console.log(`手动触发${STATUS_BALL_CONFIGS[eventType].name}事件`);
+        startSpecialEventFlow(eventType);
+    } else {
+        console.error(`未知的事件类型: ${eventType}。可用类型:`, Object.keys(STATUS_BALL_CONFIGS));
+    }
+};
+
+// ===== 聊天消息优先级处理 =====
+
+/**
+ * 聊天API调用的队列包装器
+ * 这确保了聊天消息具有更高的优先级
+ */
+async function callChatAPIWithPriority(contact, turnContext = [], isUrgent = true) {
+    return new Promise((resolve, reject) => {
+        const priority = isUrgent ? 
+            window.apiRequestQueue.PRIORITY.URGENT : 
+            window.apiRequestQueue.PRIORITY.HIGH;
+            
+        window.apiRequestQueue.addRequest(
+            async () => {
+                const result = await callAPI(contact, turnContext);
+                if (result === null) {
+                    // callAPI已经处理了错误显示，这里不需要再抛出错误
+                    return { replies: [] }; // 返回空回复列表
+                }
+                return result;
+            },
+            {
+                priority: priority,
+                description: `聊天API调用 - ${contact.name}`,
+                onComplete: (requestId, result) => {
+                    resolve(result);
+                },
+                onError: (requestId, error) => {
+                    // 这里一般不会执行到，因为callAPI已经处理错误了
+                    reject(error);
+                }
+            }
+        );
+    });
+}
+
+// 将新的聊天API函数设为全局可访问，替代原有的直接调用
+window.callChatAPIWithPriority = callChatAPIWithPriority;
+
+// ===== 朋友圈操作锁定机制 =====
+
+/**
+ * 朋友圈操作锁定管理器
+ */
+class MomentsLockManager {
+    constructor() {
+        this.isLocked = false;
+        this.lockReason = '';
+        this.lockStartTime = null;
+    }
+    
+    /**
+     * 锁定朋友圈操作
+     */
+    lock(reason = '系统正在处理中') {
+        this.isLocked = true;
+        this.lockReason = reason;
+        this.lockStartTime = Date.now();
+        this.updateUI();
+        console.log(`[朋友圈锁定] ${reason}`);
+    }
+    
+    /**
+     * 解锁朋友圈操作
+     */
+    unlock() {
+        if (this.isLocked) {
+            const lockDuration = Date.now() - this.lockStartTime;
+            console.log(`[朋友圈解锁] 锁定持续时间: ${Math.round(lockDuration / 1000)}秒`);
+        }
+        
+        this.isLocked = false;
+        this.lockReason = '';
+        this.lockStartTime = null;
+        this.updateUI();
+    }
+    
+    /**
+     * 检查是否被锁定
+     */
+    checkLocked(showMessage = true) {
+        if (this.isLocked && showMessage) {
+            showToast(this.lockReason || '朋友圈正在处理中，请稍后再试');
+        }
+        return this.isLocked;
+    }
+    
+    /**
+     * 更新UI状态
+     */
+    updateUI() {
+        // 更新朋友圈相关按钮状态
+        const momentButtons = document.querySelectorAll('.generate-moment-btn, .moment-menu-btn, .moment-like-btn');
+        momentButtons.forEach(btn => {
+            if (this.isLocked) {
+                btn.disabled = true;
+                btn.style.opacity = '0.5';
+                btn.style.cursor = 'not-allowed';
+            } else {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                btn.style.cursor = 'pointer';
+            }
+        });
+        
+        // 如果锁定状态，显示锁定提示
+        this.updateLockIndicator();
+    }
+    
+    /**
+     * 更新锁定指示器
+     */
+    updateLockIndicator() {
+        const momentsPage = document.getElementById('momentsPage');
+        const isOnMomentsPage = momentsPage && momentsPage.classList.contains('active');
+        
+        let indicator = document.getElementById('momentsLockIndicator');
+        
+        if (this.isLocked && isOnMomentsPage) {
+            if (!indicator) {
+                indicator = document.createElement('div');
+                indicator.id = 'momentsLockIndicator';
+                indicator.style.cssText = `
+                    position: absolute;
+                    top: 70px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    background: rgba(255, 152, 0, 0.9);
+                    color: white;
+                    padding: 8px 16px;
+                    border-radius: 20px;
+                    font-size: 12px;
+                    z-index: 100;
+                    backdrop-filter: blur(10px);
+                    animation: fadeInOut 2s infinite;
+                    max-width: 80%;
+                    text-align: center;
+                `;
+                momentsPage.appendChild(indicator);
+                
+                // 添加动画样式
+                if (!document.getElementById('lockIndicatorStyles')) {
+                    const style = document.createElement('style');
+                    style.id = 'lockIndicatorStyles';
+                    style.textContent = `
+                        @keyframes fadeInOut {
+                            0%, 100% { opacity: 0.7; }
+                            50% { opacity: 1; }
+                        }
+                    `;
+                    document.head.appendChild(style);
+                }
+            }
+            indicator.textContent = `🔒 ${this.lockReason}`;
+        } else {
+            if (indicator) {
+                indicator.remove();
+            }
+        }
+    }
+}
+
+// 创建全局锁定管理器实例
+window.momentsLockManager = new MomentsLockManager();
+
+// ===== 状态球管理器实用函数 =====
+
+/**
+ * 手动显示API队列状态
+ * 当需要强制显示API队列时调用
+ */
+function showAPIQueueStatusManually() {
+    if (window.statusBallManager) {
+        window.statusBallManager.updateAPIQueueStatus();
+    }
+}
+
+/**
+ * 手动隐藏所有状态球
+ */
+function hideAllStatusBalls() {
+    if (window.statusBallManager) {
+        window.statusBallManager.hideStatusBall();
+    }
+}
+
+/**
+ * 获取当前状态球信息
+ * @returns {Object} 当前状态信息
+ */
+function getCurrentStatusBallInfo() {
+    if (window.statusBallManager) {
+        return {
+            currentState: window.statusBallManager.currentState,
+            activeStates: window.statusBallManager.getActiveStates(),
+            stateDetails: window.statusBallManager.getCurrentState()
+        };
+    }
+    return null;
+}
+
+/**
+ * 强制显示特殊事件状态
+ * @param {string} eventType - 事件类型
+ * @param {Object} queueState - 队列状态
+ */
+function showSpecialEventStatus(eventType, queueState) {
+    if (window.statusBallManager) {
+        window.statusBallManager.showSpecialEvent(eventType, queueState);
+    }
+}
+
+// 将实用函数暴露到全局
+window.showAPIQueueStatusManually = showAPIQueueStatusManually;
+window.hideAllStatusBalls = hideAllStatusBalls;
+window.getCurrentStatusBallInfo = getCurrentStatusBallInfo;
+window.showSpecialEventStatus = showSpecialEventStatus;
+
+/**
+ * 切换事件类型的渐变背景
+ * @param {string} eventType - 事件类型
+ * @param {number} gradientIndex - 渐变索引（0为主渐变，1-4为替代渐变）
+ */
+function switchEventGradient(eventType, gradientIndex = 0) {
+    if (STATUS_BALL_CONFIGS[eventType]) {
+        const config = STATUS_BALL_CONFIGS[eventType];
+        
+        if (gradientIndex === 0) {
+            // 使用主渐变
+            return config.theme.gradient;
+        } else if (config.theme.alternativeGradients && config.theme.alternativeGradients[gradientIndex - 1]) {
+            // 使用替代渐变
+            return config.theme.alternativeGradients[gradientIndex - 1];
+        }
+    }
+    
+    // 默认返回主渐变
+    return STATUS_BALL_CONFIGS[eventType]?.theme.gradient || 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+}
+
+/**
+ * 获取事件类型的所有渐变选项
+ * @param {string} eventType - 事件类型
+ */
+function getEventGradients(eventType) {
+    if (STATUS_BALL_CONFIGS[eventType]) {
+        const config = STATUS_BALL_CONFIGS[eventType];
+        const gradients = [config.theme.gradient];
+        
+        if (config.theme.alternativeGradients) {
+            gradients.push(...config.theme.alternativeGradients);
+        }
+        
+        return gradients;
+    }
+    return [];
+}
+
+/**
+ * 应用随机渐变到事件类型
+ * @param {string} eventType - 事件类型
+ */
+function applyRandomGradient(eventType) {
+    const gradients = getEventGradients(eventType);
+    if (gradients.length > 0) {
+        const randomIndex = Math.floor(Math.random() * gradients.length);
+        return gradients[randomIndex];
+    }
+    return null;
+}
+
+// 暴露到全局
+window.switchEventGradient = switchEventGradient;
+window.getEventGradients = getEventGradients;
+window.applyRandomGradient = applyRandomGradient;
+
+// === API配置管理相关函数 ===
+
+/**
+ * 加载配置选择器
+ */
+async function loadConfigSelector() {
+    try {
+        const configSelector = document.getElementById('configSelector');
+        if (!configSelector || !window.apiConfigManager) {
+            return;
+        }
+
+        // 获取所有配置
+        const configs = await window.apiConfigManager.getAllConfigs();
+        const activeConfig = await window.apiConfigManager.getActiveConfig();
+        
+        // 清空并重新填充选择器
+        configSelector.innerHTML = '';
+        
+        if (configs.length === 0) {
+            configSelector.innerHTML = '<option value="">没有可用配置</option>';
+            return;
+        }
+        
+        configs.forEach(config => {
+            const option = document.createElement('option');
+            option.value = config.id;
+            option.textContent = config.configName || '未命名配置';
+            if (config.id === window.apiConfigManager.defaultConfigKey) {
+                option.textContent += ' (默认)';
+                option.setAttribute('data-is-default', 'true');
+            }
+            if (activeConfig && config.id === activeConfig.id) {
+                option.selected = true;
+            }
+            configSelector.appendChild(option);
+        });
+        
+        // 更新按钮状态
+        updateConfigActionButtons();
+        
+    } catch (error) {
+        console.error('加载配置选择器失败:', error);
+    }
+}
+
+/**
+ * 加载当前配置到表单
+ */
+async function loadCurrentConfigToForm() {
+    try {
+        if (!window.apiConfigManager) {
+            return;
+        }
+
+        const activeConfig = await window.apiConfigManager.getActiveConfig();
+        if (!activeConfig) {
+            // 如果没有配置，显示空表单
+            clearConfigForm();
+            return;
+        }
+
+        // 填充表单字段
+        const fillField = (id, value) => {
+            const element = document.getElementById(id);
+            if (element) element.value = value || '';
+        };
+
+        fillField('configName', activeConfig.configName);
+        fillField('apiUrl', activeConfig.url);
+        fillField('apiKey', activeConfig.key);
+        fillField('apiTimeout', activeConfig.timeout || 60);
+        
+        // Minimax配置从localStorage读取（单一全局配置，不属于API配置）
+        fillField('minimaxGroupId', localStorage.getItem('minimaxGroupId') || '');
+        fillField('minimaxApiKey', localStorage.getItem('minimaxApiKey') || '');
+        
+        // 上下文滑块
+        const contextSlider = document.getElementById('contextSlider');
+        const contextValue = document.getElementById('contextValue');
+        if (contextSlider && contextValue) {
+            contextSlider.value = activeConfig.contextMessageCount || 10;
+            contextValue.textContent = `${activeConfig.contextMessageCount || 10}条`;
+        }
+        
+        // 保存模型值，等模型列表加载后再设置
+        window.pendingModelSelection = {
+            primary: activeConfig.model || '',
+            secondary: activeConfig.secondaryModel || 'sync_with_primary'
+        };
+        
+        // 更新主Key统计
+        const mainKeyInput = document.getElementById('apiKey');
+        if (mainKeyInput && mainKeyInput.value) {
+            updateMainKeyStats(mainKeyInput);
+        }
+        
+        // 验证和刷新全局API配置状态
+        await ensureApiConfigIsUpdated();
+        
+        // 加载额外的API Keys
+        // 先清除现有的额外key行
+        const existingRows = document.querySelectorAll('.api-provider-row');
+        existingRows.forEach(row => row.remove());
+        
+        // 如果有apiKeys数组，加载它们
+        if (activeConfig.apiKeys && activeConfig.apiKeys.length > 1) {
+            // 跳过第一个key（主key），从第二个开始
+            for (let i = 1; i < activeConfig.apiKeys.length; i++) {
+                const keyData = activeConfig.apiKeys[i];
+                addProviderRow();
+                
+                // 填充key值
+                const rows = document.querySelectorAll('.api-provider-row');
+                const lastRow = rows[rows.length - 1];
+                const keyInput = lastRow.querySelector('.api-key-input');
+                const enableButton = lastRow.querySelector('.key-enable-btn');
+                
+                if (keyInput) {
+                    // 确保keyData.key是字符串
+                    let keyValue = keyData.key || keyData || '';
+                    if (typeof keyValue === 'object') {
+                        keyValue = keyValue.key || keyValue.toString();
+                    }
+                    keyInput.value = keyValue;
+                    // 更新统计信息
+                    updateKeyStats(keyInput);
+                }
+                
+                if (enableButton) {
+                    if (keyData.enabled) {
+                        enableButton.dataset.enabled = 'true';
+                        enableButton.dataset.status = 'enabled';
+                        enableButton.innerHTML = '🟢';
+                        enableButton.style.backgroundColor = '#28a745';
+                        // 为启用的副key添加CSS类
+                        lastRow.classList.add('enabled');
+                    } else {
+                        enableButton.dataset.enabled = 'false';
+                        enableButton.dataset.status = 'disabled';
+                        enableButton.innerHTML = '⚪';
+                        enableButton.style.backgroundColor = '#6c757d';
+                        // 确保未启用的副key没有启用类
+                        lastRow.classList.remove('enabled');
+                    }
+                }
+            }
+        }
+        
+        // 加载Unsplash API Key (仍然从localStorage读取)
+        const unsplashApiKeyElement = document.getElementById('unsplashApiKey');
+        if (unsplashApiKeyElement) {
+            unsplashApiKeyElement.value = localStorage.getItem('forumUnsplashApiKey') || localStorage.getItem('unsplashApiKey') || '';
+        }
+
+        // 检查是否有重复的API Keys
+        checkAllApiKeysForDuplicates();
+        
+        // 确保所有API key状态正确显示
+        setTimeout(() => {
+            updateAllKeyStates();
+        }, 100);
+        
+    } catch (error) {
+        console.error('加载配置到表单失败:', error);
+    }
+}
+
+/**
+ * 为当前配置加载模型列表
+ */
+async function loadModelsForCurrentConfig() {
+    try {
+        const primarySelect = document.getElementById('primaryModelSelect');
+        const secondarySelect = document.getElementById('secondaryModelSelect');
+        
+        if (!primarySelect || !secondarySelect) return;
+        
+        const activeConfig = await window.apiConfigManager.getActiveConfig();
+        if (!activeConfig || !activeConfig.url || !activeConfig.key) {
+            primarySelect.innerHTML = '<option value="">请先配置API</option>';
+            secondarySelect.innerHTML = '<option value="sync_with_primary">与主模型保持一致</option>';
+            return;
+        }
+        
+        // 重置模型选择器，显示当前选择的模型
+        const primaryModel = window.pendingModelSelection?.primary || activeConfig.model || '';
+        const secondaryModel = window.pendingModelSelection?.secondary || activeConfig.secondaryModel || 'sync_with_primary';
+        
+        // 如果有主模型，直接显示它
+        if (primaryModel) {
+            primarySelect.innerHTML = `<option value="${primaryModel}">${primaryModel}</option>`;
+        } else {
+            primarySelect.innerHTML = '<option value="">请选择模型</option>';
+        }
+        
+        secondarySelect.innerHTML = '<option value="sync_with_primary">与主模型保持一致</option>';
+        if (secondaryModel && secondaryModel !== 'sync_with_primary') {
+            secondarySelect.innerHTML += `<option value="${secondaryModel}">${secondaryModel}</option>`;
+        }
+        
+        // 尝试从缓存获取模型列表（不发起网络请求）
+        const cachedModels = window.apiConfigManager?.availableModels?.get(activeConfig.id);
+        if (cachedModels && cachedModels.length > 0) {
+            // 有缓存，填充所有模型选项
+            if (primarySelect.options.length === 1 && primarySelect.options[0].value === primaryModel) {
+                // 只有当前模型，添加其他模型选项
+                cachedModels.forEach(modelId => {
+                    if (modelId !== primaryModel) {
+                        const option = document.createElement('option');
+                        option.value = modelId;
+                        option.textContent = modelId;
+                        primarySelect.appendChild(option);
+                    }
+                });
+            }
+            
+            if (secondarySelect.options.length === 1) {
+                cachedModels.forEach(modelId => {
+                    if (modelId !== secondaryModel) {
+                        const option = document.createElement('option');
+                        option.value = modelId;
+                        option.textContent = modelId;
+                        secondarySelect.appendChild(option);
+                    }
+                });
+            }
+            
+            // 设置正确的选中值
+            primarySelect.value = primaryModel;
+            secondarySelect.value = secondaryModel;
+        }
+        
+        // 绑定事件
+        primarySelect.onchange = handlePrimaryModelChange;
+        
+        // 清除临时保存的值
+        window.pendingModelSelection = null;
+        
+    } catch (error) {
+        console.error('加载模型列表失败:', error);
+    }
+}
+
+/**
+ * 清空配置表单
+ */
+function clearConfigForm() {
+    // 只清空API配置相关字段，不清空全局配置（Minimax, Unsplash等）
+    const fields = ['configName', 'apiUrl', 'apiKey', 'apiTimeout'];
+    fields.forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.value = '';
+    });
+    
+    // Minimax字段保持不变，从localStorage读取
+    const minimaxGroupIdElement = document.getElementById('minimaxGroupId');
+    const minimaxApiKeyElement = document.getElementById('minimaxApiKey');
+    if (minimaxGroupIdElement) {
+        minimaxGroupIdElement.value = localStorage.getItem('minimaxGroupId') || '';
+    }
+    if (minimaxApiKeyElement) {
+        minimaxApiKeyElement.value = localStorage.getItem('minimaxApiKey') || '';
+    }
+    
+    const contextSlider = document.getElementById('contextSlider');
+    const contextValue = document.getElementById('contextValue');
+    if (contextSlider && contextValue) {
+        contextSlider.value = 10;
+        contextValue.textContent = '10条';
+    }
+    
+    const primarySelect = document.getElementById('primaryModelSelect');
+    const secondarySelect = document.getElementById('secondaryModelSelect');
+    if (primarySelect) primarySelect.innerHTML = '<option value="">请先完成第1步保存API配置</option>';
+    if (secondarySelect) secondarySelect.innerHTML = '<option value="sync_with_primary">与主模型保持一致</option>';
+}
+
+/**
+ * 处理配置切换
+ */
+async function handleConfigSwitch(configId) {
+    try {
+        if (!configId || !window.apiConfigManager) return;
+        
+        // 清除新配置状态
+        window.currentConfigState = null;
+        
+        // 切换到选中的配置
+        await window.apiConfigManager.switchToConfig(configId);
+        
+        // 重新加载表单
+        await loadCurrentConfigToForm();
+        
+        // 更新按钮状态
+        updateConfigActionButtons();
+        
+        showToast('配置已切换');
+        
+    } catch (error) {
+        console.error('切换配置失败:', error);
+        showToast('切换配置失败: ' + error.message);
+    }
+}
+
+/**
+ * 显示新配置表单
+ */
+function showNewConfigForm() {
+    // 清空表单
+    clearConfigForm();
+    
+    // 设置新配置状态标识
+    window.currentConfigState = 'new';
+    
+    // 清除配置选择器的选择
+    const configSelector = document.getElementById('configSelector');
+    if (configSelector) {
+        configSelector.value = '';
+    }
+    
+    // 设置默认值
+    const configNameField = document.getElementById('configName');
+    if (configNameField) {
+        configNameField.value = '新配置 ' + Date.now().toString().slice(-6);
+    }
+    
+    const timeoutField = document.getElementById('apiTimeout');
+    if (timeoutField) {
+        timeoutField.value = 60;
+    }
+    
+    showToast('请填写新配置信息');
+}
+
+/**
+ * 复制当前配置
+ */
+async function duplicateCurrentConfig() {
+    try {
+        if (!window.apiConfigManager) return;
+        
+        const activeConfig = await window.apiConfigManager.getActiveConfig();
+        if (!activeConfig) {
+            showToast('没有可复制的配置');
+            return;
+        }
+        
+        const duplicated = await window.apiConfigManager.duplicateConfig(activeConfig.id);
+        
+        // 重新加载配置选择器
+        await loadConfigSelector();
+        
+        // 切换到新配置
+        const configSelector = document.getElementById('configSelector');
+        if (configSelector) {
+            configSelector.value = duplicated.id;
+            await handleConfigSwitch(duplicated.id);
+        }
+        
+        showToast('配置已复制');
+        
+    } catch (error) {
+        console.error('复制配置失败:', error);
+        showToast('复制配置失败: ' + error.message);
+    }
+}
+
+/**
+ * 删除当前配置
+ */
+async function deleteCurrentConfig() {
+    try {
+        if (!window.apiConfigManager) return;
+        
+        const configSelector = document.getElementById('configSelector');
+        if (!configSelector || !configSelector.value) {
+            showToast('没有选中要删除的配置');
+            return;
+        }
+        
+        const configId = configSelector.value;
+        const activeConfig = await window.apiConfigManager.getConfigById(configId);
+        
+        if (!activeConfig) {
+            showToast('配置不存在');
+            return;
+        }
+        
+        if (configId === window.apiConfigManager.defaultConfigKey) {
+            showToast('不能删除默认配置');
+            return;
+        }
+        
+        if (!confirm(`确定要删除配置"${activeConfig.configName}"吗？此操作不可撤销。`)) {
+            return;
+        }
+        
+        await window.apiConfigManager.deleteConfig(configId);
+        
+        // 重新加载配置选择器
+        await loadConfigSelector();
+        
+        // 加载当前配置到表单
+        await loadCurrentConfigToForm();
+        
+        showToast('配置已删除');
+        
+    } catch (error) {
+        console.error('删除配置失败:', error);
+        showToast('删除配置失败: ' + error.message);
+    }
+}
+
+/**
+ * 更新配置操作按钮的状态
+ */
+function updateConfigActionButtons() {
+    const configSelector = document.getElementById('configSelector');
+    const deleteBtn = document.getElementById('deleteBtn');
+    const duplicateBtn = document.getElementById('duplicateBtn');
+    
+    if (!configSelector || !deleteBtn || !duplicateBtn) return;
+    
+    const selectedConfigId = configSelector.value;
+    const isDefaultConfig = selectedConfigId === (window.apiConfigManager?.defaultConfigKey || 'settings');
+    
+    // 默认配置不能删除
+    deleteBtn.disabled = isDefaultConfig || !selectedConfigId;
+    deleteBtn.style.opacity = deleteBtn.disabled ? '0.5' : '1';
+    deleteBtn.style.cursor = deleteBtn.disabled ? 'not-allowed' : 'pointer';
+    
+    // 没有配置时不能复制
+    duplicateBtn.disabled = !selectedConfigId;
+    duplicateBtn.style.opacity = duplicateBtn.disabled ? '0.5' : '1';
+    duplicateBtn.style.cursor = duplicateBtn.disabled ? 'not-allowed' : 'pointer';
+}
+
+/**
+ * 确保全局API配置与配置管理器保持同步
+ */
+async function ensureApiConfigIsUpdated() {
+    try {
+        if (!window.apiConfigManager) return;
+        
+        const activeConfig = await window.apiConfigManager.getActiveConfig();
+        if (!activeConfig) return;
+        
+        // 获取当前启用的key
+        const enabledKey = window.apiConfigManager.getEnabledKey(activeConfig);
+        
+        // 更新全局apiSettings，确保包含所有必要字段
+        if (enabledKey && window.apiSettings) {
+            Object.assign(window.apiSettings, {
+                url: activeConfig.url || '',
+                key: enabledKey,
+                model: activeConfig.model || '',
+                secondaryModel: activeConfig.secondaryModel || 'sync_with_primary',
+                contextMessageCount: activeConfig.contextMessageCount || 10,
+                timeout: activeConfig.timeout || 60
+                // minimax配置不再包含在apiSettings中
+            });
+            
+            console.log('全局API配置已更新:', {
+                url: window.apiSettings.url,
+                keyPrefix: window.apiSettings.key ? window.apiSettings.key.substring(0, 8) + '...' : 'empty',
+                model: window.apiSettings.model
+            });
+        }
+        
+    } catch (error) {
+        console.error('更新全局API配置失败:', error);
+    }
+}
+
+// 暴露配置管理函数到全局
+window.loadConfigSelector = loadConfigSelector;
+window.loadCurrentConfigToForm = loadCurrentConfigToForm;
+window.handleConfigSwitch = handleConfigSwitch;
+window.showNewConfigForm = showNewConfigForm;
+window.duplicateCurrentConfig = duplicateCurrentConfig;
+window.deleteCurrentConfig = deleteCurrentConfig;
+window.updateConfigActionButtons = updateConfigActionButtons;
+window.ensureApiConfigIsUpdated = ensureApiConfigIsUpdated;
+window.loadModelsForConfig = loadModelsForConfig;
+window.saveModelSelection = saveModelSelection;
+
+// === 互动界面数据同步 ===
+
+/**
+ * 同步数据到互动界面
+ */
+async function syncInteractiveData() {
+    try {
+        showToast('正在同步角色数据...', 'info');
+        
+        const interactiveFrame = document.getElementById('interactiveFrame');
+        if (!interactiveFrame || !interactiveFrame.contentWindow) {
+            showToast('互动界面未准备就绪', 'error');
+            return;
+        }
+
+        // 准备同步数据
+        const syncData = {
+            type: 'BULK_DATA_SYNC',
+            characters: contacts.filter(c => c.type === 'private').map(contact => ({
+                name: contact.name,
+                personality: contact.personality,
+                voiceId: contact.voiceId || '',
+                avatar: contact.avatarFileId || contact.avatar || ''
+            })),
+            apiSettings: {
+                url: window.apiSettings?.url || '',
+                key: window.apiSettings?.key || '',
+                model: window.apiSettings?.model || '',
+                minimaxGroupId: window.minimaxSettings?.groupId || '',
+                minimaxApiKey: window.minimaxSettings?.apiKey || ''
+            },
+            userProfile: {
+                name: window.userProfile?.name || '默认用户',
+                personality: window.userProfile?.personality || '一个温柔的探索者'
+            }
+        };
+
+        // 发送数据到iframe
+        interactiveFrame.contentWindow.postMessage(syncData, window.location.origin);
+        
+        console.log('数据同步到互动界面:', syncData);
+        showToast('角色数据同步完成', 'success');
+        
+    } catch (error) {
+        console.error('互动界面数据同步失败:', error);
+        showToast('数据同步失败', 'error');
+    }
+}
+
+/**
+ * 处理来自互动界面的数据更新
+ */
+function handleInteractiveDataUpdate(data) {
+    try {
+        console.log('收到互动界面数据更新:', data);
+        
+        if (data.type === 'UPDATE_CONTACT' && data.contactId && data.updateData) {
+            // 找到对应的contact并更新
+            const contact = contacts.find(c => c.name === data.contactId || c.id === data.contactId);
+            if (contact) {
+                // 更新互动相关字段
+                if (data.updateData.interactiveBackgroundFileId !== undefined) {
+                    contact.interactiveBackgroundFileId = data.updateData.interactiveBackgroundFileId;
+                }
+                if (data.updateData.touchZones !== undefined) {
+                    contact.touchZones = data.updateData.touchZones;
+                }
+                if (data.updateData.theme !== undefined) {
+                    contact.theme = data.updateData.theme;
+                }
+                if (data.updateData.ttsEnabled !== undefined) {
+                    contact.ttsEnabled = data.updateData.ttsEnabled;
+                }
+                if (data.updateData.diaryEntries !== undefined) {
+                    contact.diaryEntries = { ...contact.diaryEntries, ...data.updateData.diaryEntries };
+                }
+                if (data.updateData.interactiveChatHistory !== undefined) {
+                    // 追加聊天记录而不是替换
+                    contact.interactiveChatHistory = contact.interactiveChatHistory || [];
+                    contact.interactiveChatHistory.push(...data.updateData.interactiveChatHistory);
+                }
+                
+                // 保存到数据库
+                saveDataToDB().then(() => {
+                    console.log(`角色 "${contact.name}" 的互动数据已更新`);
+                    showToast('互动数据已保存', 'success');
+                }).catch(error => {
+                    console.error('保存互动数据失败:', error);
+                    showToast('保存互动数据失败', 'error');
+                });
+            }
+        }
+        
+    } catch (error) {
+        console.error('处理互动界面数据更新失败:', error);
+    }
+}
+
+// 监听来自iframe的消息
+window.addEventListener('message', (event) => {
+    // 只处理来自互动界面的消息
+    if (event.origin === window.location.origin && event.data && event.data.type) {
+        handleInteractiveDataUpdate(event.data);
     }
 });
-// 【【【 修改结束 】】】
 
-// 触发文件选择的标准写法
-function triggerFileSelect() {
-    const fileInput = document.getElementById('importFileInput');
-    if (!fileInput) {
-        showToast('错误：找不到文件输入框');
-        return;
+// 在进入互动页面时自动同步数据
+const originalShowPage = window.showPage;
+window.showPage = function(pageId) {
+    const result = originalShowPage.call(this, pageId);
+    
+    // 如果切换到互动页面，延迟1秒后自动同步数据
+    if (pageId === 'interactivePage') {
+        setTimeout(() => {
+            syncInteractiveData();
+        }, 1000);
     }
-    // 使用 click() 方法触发原生选择器
+    
+    return result;
+};
+
+// 暴露互动相关函数到全局
+window.syncInteractiveData = syncInteractiveData;
+window.handleInteractiveDataUpdate = handleInteractiveDataUpdate;
+
+// === 用户体验增强函数 ===
+
+/**
+ * 显示API配置保存成功状态
+ */
+function showConfigSaveSuccess() {
+    // 显示成功提示
+    const hintElement = document.getElementById('configSaveHint');
+    if (hintElement) {
+        hintElement.style.display = 'block';
+        // 5秒后自动隐藏
+        setTimeout(() => {
+            if (hintElement) {
+                hintElement.style.display = 'none';
+            }
+        }, 5000);
+    }
+    
+    // 隐藏模型选择的提醒
+    const reminderElement = document.getElementById('modelSelectionReminder');
+    if (reminderElement) {
+        reminderElement.style.display = 'none';
+    }
+    
+    // 重新加载模型选择器选项
+    loadApiConfigSelectorsForModels();
+}
+
+/**
+ * 验证用户流程完整性
+ */
+function validateUserFlow() {
+    const primaryConfig = document.getElementById('primaryConfigSelect')?.value;
+    const primaryModel = document.getElementById('primaryModelSelect')?.value;
+    
+    // 检查是否已完成必要的配置步骤
+    if (!primaryConfig) {
+        showToast('⚠️ 请先完成：①保存API配置 → ②选择API配置 → ③选择模型');
+        // 滚动到API配置区域
+        const configForm = document.getElementById('apiConfigForm');
+        if (configForm) {
+            configForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        return false;
+    }
+    
+    if (!primaryModel) {
+        showToast('⚠️ 请选择主要模型，然后滑到最后点击"完成设置"');
+        // 滚动到模型选择区域
+        const modelSection = document.getElementById('primaryModelSelect');
+        if (modelSection) {
+            modelSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        return false;
+    }
+    
+    return true;
+}
+
+/**
+ * 显示流程完成消息
+ */
+function showFlowCompletionMessage() {
+    showToast('🎉 配置完成！您现在可以开始使用AI对话了');
+    
+    // 2秒后询问是否关闭设置窗口
+    setTimeout(() => {
+        const modal = document.getElementById('apiSettingsModal');
+        if (modal && window.getComputedStyle(modal).display !== 'none') {
+            // 询问用户是否关闭设置窗口
+            if (confirm('配置已完成，是否关闭设置窗口开始对话？')) {
+                closeModal('apiSettingsModal');
+            }
+        }
+    }, 2000);
+}
+
+/**
+ * 检查并更新界面提示状态
+ */
+function updateUIHintStatus() {
+    const primaryConfig = document.getElementById('primaryConfigSelect')?.value;
+    const reminderElement = document.getElementById('modelSelectionReminder');
+    const hintElement = document.getElementById('configSaveHint');
+    
+    if (primaryConfig && reminderElement) {
+        // 如果已有API配置，隐藏提醒
+        reminderElement.style.display = 'none';
+    } else if (reminderElement) {
+        // 如果没有API配置，显示提醒
+        reminderElement.style.display = 'block';
+    }
+    
+    // 隐藏成功提示（因为用户可能在修改配置）
+    if (hintElement) {
+        hintElement.style.display = 'none';
+    }
+}
+
+/**
+ * 增强的测试连接函数
+ */
+async function enhancedTestApiConnection() {
     try {
-        fileInput.click();
-    } catch (e) {
-        console.error(e);
-        showToast('无法打开文件选择器，请检查存储权限');
+        await testApiConnection();
+        // 测试成功后提示用户保存配置
+        showToast('✅ 连接测试成功！请保存API配置继续设置');
+    } catch (error) {
+        console.error('测试连接失败:', error);
+        showToast('❌ 连接测试失败，请检查API URL和Key');
     }
 }
 
-// 处理文件选择事件
-function handleFileSelect(event) {
-    const file = event.target.files[0];
-    if (!file) {
-        return;
-    }
-    
-    // 检查文件类型
-    if (!file.name.endsWith('.json')) {
-        showToast('只支持 JSON 格式的备份文件');
-        return;
-    }
-    
-    // 调用导入函数（如果存在）
-    if (typeof window.importDatabase === 'function') {
-        window.importDatabase(file);
-    } else {
-        showToast('导入功能未初始化，请刷新页面后重试');
-    }
-    
-    // 重置文件输入，允许再次选择同一文件
-    event.target.value = '';
-}
+// 将增强测试连接函数暴露到全局作用域
+window.enhancedTestApiConnection = enhancedTestApiConnection;
 
-/**
- * 启动计时器 (App 启动/前台时调用)
- */
-function startProactiveTimer() {
-    // 1. 清理旧的计时器
-    if (proactiveTimer) clearTimeout(proactiveTimer);
-    if (proactiveRefreshTimer) clearInterval(proactiveRefreshTimer);
-
-    // 2. 检查当前状态
-    const hasPending = localStorage.getItem(PROACTIVE_STORAGE_KEY);
-    
-    if (hasPending) {
-        // 如果已经有待发送的消息，说明用户回来了，立即推迟时间（续命）
-        console.log("[主动关怀] 检测到待发送消息，进入续命模式。");
-        refreshProactiveNotification(); 
-    } else {
-        // 如果没有消息，则启动 2 分钟生成倒计时
-        console.log(`[主动关怀] 无待发送消息，启动2分钟生成倒计时...`);
-        proactiveTimer = setTimeout(async () => {
-            await generateProactiveMessage();
-        }, PROACTIVE_TRIGGER_DELAY);
-    }
-
-    // 3. 启动看门狗循环：每 15 分钟执行一次推迟操作
-    // 只要用户还在这里，通知就会无限期推迟
-    proactiveRefreshTimer = setInterval(() => {
-        refreshProactiveNotification();
-    }, PROACTIVE_REFRESH_INTERVAL);
-}
-
-/**
- * 停止计时器 (App 后台/关闭时调用)
- */
-function stopProactiveTimer() {
-    console.log("[主动关怀] 用户离开，停止JS计时器，保留最后一次通知设置。");
-    
-    if (proactiveTimer) {
-        clearTimeout(proactiveTimer);
-        proactiveTimer = null;
-    }
-    
-    if (proactiveRefreshTimer) {
-        clearInterval(proactiveRefreshTimer);
-        proactiveRefreshTimer = null;
-    }
-    
-    // 离开时最后刷新一次，确保倒计时是从现在开始算起最精准
-    refreshProactiveNotification(); 
-}
-
-/**
- * 更新顶部灰色统计小字的显示内容
- */
-function updateStatsUI() {
-    const el = document.getElementById('hitRateShort');
-    const container = document.getElementById('usageStatsDisplay');
-    
-    if (!el || !container) return;
-
-    // 1. 检查开关：如果用户在设置里关闭了，彻底隐藏
-    if (apiSettings.showUsageStats === false) {
-        container.style.display = 'none';
-        return;
-    }
-
-    // 2. 检查数据：如果没有统计数据，也先隐藏
-    if (!window.lastStats) {
-        container.style.display = 'none';
-        return;
-    }
-
-    // 3. 有数据且开启了开关，显示容器
-    container.style.display = 'inline-block';
-    
-    const { hitRate, totalPrompt, cachedTokens, outputTokens, cost } = window.lastStats;
-    
-    if (showDetailedStats) {
-        // 展开模式
-        el.innerHTML = `命中:${hitRate}% | 缓存:${cachedTokens} | ￥${cost}`;
-    } else {
-        // 简洁模式
-        el.innerHTML = `| 命中:${hitRate}%`;
-    }
-}
-
-/**
- * 切换统计信息的展开状态
- */
-function toggleUsageDetail() {
-    showDetailedStats = !showDetailedStats;
-    updateStatsUI();
-}
