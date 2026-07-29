@@ -1,46 +1,36 @@
 {
+  "name": "Miya",
+  "short_name": "Miya",
+  "start_url": "./?source=pwa",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
   "icons": [
     {
-      "src": "../icons/icon-48.webp",
-      "type": "image/png",
-      "sizes": "48x48",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "../icons/icon-72.webp",
-      "type": "image/png",
-      "sizes": "72x72",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "../icons/icon-96.webp",
-      "type": "image/png",
-      "sizes": "96x96",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "../icons/icon-128.webp",
-      "type": "image/png",
-      "sizes": "128x128",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "../icons/icon-192.webp",
-      "type": "image/png",
+      "src": "img/miya-icon-192.png?v=51",
       "sizes": "192x192",
-      "purpose": "any maskable"
+      "type": "image/png",
+      "purpose": "any"
     },
     {
-      "src": "../icons/icon-256.webp",
-      "type": "image/png",
-      "sizes": "256x256",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "../icons/icon-512.webp",
-      "type": "image/png",
+      "src": "img/miya-icon-512.png?v=51",
       "sizes": "512x512",
-      "purpose": "any maskable"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "img/miya-icon.png?v=51",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "img/miya-icon-512.png?v=51",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }
