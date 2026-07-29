@@ -20,6 +20,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Remove old android project (force refresh config)
+        run: rm -rf android
+
       - name: Sync Capacitor
         run: npx cap sync android
 
