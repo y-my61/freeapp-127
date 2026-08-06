@@ -1,0 +1,76 @@
+# ============================================================
+# 【Capacitor 模板】build-capacitor-apk.yml
+# 适用：Web 前端（React/Vite 等）+ Capacitor 壳的项目
+#       如：Miya、玄鲸 freeapp、手抓糯米机 SullyOS
+# 构建：npm/pnpm 构建前端 → npx cap add android
+#       → npx cap sync android → gradlew assembleDebug
+#
+# 用法：
+#   1. 复制本文件到目标仓库的 .github/workflows/ 下
+#   2. 按需调整：
+#      - branches：触发分支
+#      - package manager 自动检测（有 pnpm-lock.yaml 用 pnpm，否则 npm）
+#      - 若项目自带 android 目录，cap add 会自动跳过/可去掉该步
+#   3. push 即自动构建，APK 在 Actions 的 artifact 里下载
+# ============================================================
+
+name: Build Capacitor APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            npm install -g pnpm
+            pnpm install --frozen-lockfile || pnpm install
+          else
+            npm install
+          fi
+
+      - name: Build web assets
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm build
+          else
+            npm run build
+          fi
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Build Debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Capacitor-APK
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
