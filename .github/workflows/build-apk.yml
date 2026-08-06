@@ -31,6 +31,23 @@ jobs:
       - name: Fix gradlew permissions
         run: chmod +x gradlew
 
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: web-ui/pnpm-lock.yaml
+
+      - name: Setup pnpm
+        run: |
+          npm install -g pnpm@9
+          pnpm --version
+
+      - name: Install web-ui dependencies
+        working-directory: web-ui
+        run: |
+          pnpm install --frozen-lockfile || pnpm install
+
       - name: Build Debug APK
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
