@@ -36,9 +36,9 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Setup pnpm
+      - name: Setup pnpm 10
         run: |
-          npm install -g pnpm@9
+          npm install -g pnpm@10
           pnpm --version
 
       - name: Install web-ui dependencies
